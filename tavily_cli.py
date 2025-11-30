@@ -287,7 +287,7 @@ def parse_list(ctx, param, value: str) -> Optional[list]:
 pass_cli = click.make_pass_decorator(TavilyCLI, ensure=True)
 
 
-@click.group()
+@click.group(context_settings={"help_option_names": ["-h", "--help"]})
 @click.option("-k", "--api-key", envvar="TAVILY_API_KEY", help="Tavily API key (default: $TAVILY_API_KEY)")
 @click.option("-f", "--format", "output_format", type=click.Choice(OUTPUT_FORMATS), default="text", help="Output format")
 @click.option("-v", "--verbose", is_flag=True, help="Enable debug output")
@@ -533,7 +533,7 @@ def usage(tavily_cli: TavilyCLI):
 
 
 def main():
-    cli()
+    cli(prog_name="tavily")
 
 
 if __name__ == "__main__":
