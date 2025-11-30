@@ -10,6 +10,7 @@ import sys
 from typing import Optional
 
 import click
+import requests
 from tavily import TavilyClient
 
 logger = logging.getLogger(__name__)
@@ -23,8 +24,19 @@ CONTENT_FORMATS = ["markdown", "text"]
 
 class TavilyCLI:
     def __init__(self, api_key: str, output_format: str = "text"):
+        self.api_key = api_key
         self.client = TavilyClient(api_key=api_key)
         self.output_format = output_format
+
+    def get_usage(self) -> dict:
+        """Get API usage information via REST API."""
+        response = requests.get(
+            "https://api.tavily.com/usage",
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        return response.json()
 
     def _print_dict(self, d: dict, indent: int = 0) -> None:
         """Print dictionary with indentation."""
@@ -516,7 +528,7 @@ def map_cmd(
 @pass_cli
 def usage(tavily_cli: TavilyCLI):
     """Show API key and account usage statistics."""
-    response = tavily_cli.client.get_usage()
+    response = tavily_cli.get_usage()
     tavily_cli.display_usage(response)
 
 
