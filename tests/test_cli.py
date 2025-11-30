@@ -244,24 +244,28 @@ class TestUsage:
     """Test usage command."""
 
     def test_usage(self, runner, mock_tavily_client):
-        mock_tavily_client.get_usage.return_value = {
-            "key": {
-                "usage": 150,
-                "limit": 1000,
-            },
-            "account": {
-                "current_plan": "Researcher",
-                "plan_usage": 500,
-                "plan_limit": 1000,
-                "paygo_usage": 0,
-                "paygo_limit": 100,
-            },
-        }
+        with patch("tavily_cli.requests.get") as mock_get:
+            mock_response = MagicMock()
+            mock_response.json.return_value = {
+                "key": {
+                    "usage": 150,
+                    "limit": 1000,
+                },
+                "account": {
+                    "current_plan": "Researcher",
+                    "plan_usage": 500,
+                    "plan_limit": 1000,
+                    "paygo_usage": 0,
+                    "paygo_limit": 100,
+                },
+            }
+            mock_response.raise_for_status = MagicMock()
+            mock_get.return_value = mock_response
 
-        result = runner.invoke(cli, ["-k", "test-key", "usage"])
-        assert result.exit_code == 0
-        assert "150" in result.output
-        assert "Researcher" in result.output
+            result = runner.invoke(cli, ["-k", "test-key", "usage"])
+            assert result.exit_code == 0
+            assert "150" in result.output
+            assert "Researcher" in result.output
 
 
 class TestTavilyCLI:
