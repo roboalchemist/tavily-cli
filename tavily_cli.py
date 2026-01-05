@@ -291,7 +291,7 @@ pass_cli = click.make_pass_decorator(TavilyCLI, ensure=True)
 @click.option("-k", "--api-key", envvar="TAVILY_API_KEY", help="Tavily API key (default: $TAVILY_API_KEY)")
 @click.option("-f", "--format", "output_format", type=click.Choice(OUTPUT_FORMATS), default="text", help="Output format")
 @click.option("-v", "--verbose", is_flag=True, help="Enable debug output")
-@click.version_option(version="1.0.0")
+@click.version_option(version="1.1.0")
 @click.pass_context
 def cli(ctx, api_key: str, output_format: str, verbose: bool):
     """Tavily CLI - AI-powered search from the command line.
@@ -316,13 +316,14 @@ def cli(ctx, api_key: str, output_format: str, verbose: bool):
 
 @cli.command()
 @click.argument("query")
+@click.option("-m", "--minimal", is_flag=True, help="Minimal output for small context windows (5 results, no raw content, no images)")
 @click.option("-d", "--depth", type=click.Choice(SEARCH_DEPTHS), default="basic", help="Search depth (basic=1 credit, advanced=2 credits)")
 @click.option("-t", "--topic", type=click.Choice(SEARCH_TOPICS), default="general", help="Search topic")
-@click.option("-n", "--max-results", type=click.IntRange(1, 20), default=5, help="Maximum results (1-20)")
+@click.option("-n", "--max-results", type=click.IntRange(1, 20), default=None, help="Maximum results (1-20, default: 20, minimal: 5)")
 @click.option("--time-range", type=click.Choice(TIME_RANGES), help="Filter by time range")
-@click.option("-a", "--include-answer", is_flag=False, flag_value="basic", default=None, help="Include LLM answer (basic or advanced)")
-@click.option("-r", "--include-raw", is_flag=False, flag_value="markdown", default=None, help="Include raw content (markdown or text)")
-@click.option("--include-images", is_flag=True, help="Include image results")
+@click.option("-a", "--include-answer", is_flag=False, flag_value="advanced", default="basic", help="LLM answer: basic (default), advanced (-a), or --include-answer=false to disable")
+@click.option("-r", "--include-raw", is_flag=False, flag_value="markdown", default=None, help="Raw content: markdown (default), text, or --include-raw=false to disable")
+@click.option("--include-images/--no-images", default=None, help="Include image results (default: yes)")
 @click.option("--include-domains", callback=parse_list, help="Comma-separated domains to include")
 @click.option("--exclude-domains", callback=parse_list, help="Comma-separated domains to exclude")
 @click.option("--country", help="Boost results from country")
@@ -330,21 +331,33 @@ def cli(ctx, api_key: str, output_format: str, verbose: bool):
 def search(
     tavily_cli: TavilyCLI,
     query: str,
+    minimal: bool,
     depth: str,
     topic: str,
-    max_results: int,
+    max_results: Optional[int],
     time_range: Optional[str],
     include_answer: Optional[str],
     include_raw: Optional[str],
-    include_images: bool,
+    include_images: Optional[bool],
     include_domains: Optional[list],
     exclude_domains: Optional[list],
     country: Optional[str],
 ):
     """Execute a web search query.
 
-    Example: tavily search "who is Leo Messi?" -d advanced -a
+    Example: tavily search "who is Leo Messi?"
+    Example: tavily search "python frameworks" -m  # minimal output
     """
+    # Apply defaults based on minimal flag
+    if minimal:
+        max_results = max_results if max_results is not None else 5
+        include_images = include_images if include_images is not None else False
+        include_raw = include_raw if include_raw else None  # No raw content in minimal
+    else:
+        max_results = max_results if max_results is not None else 20
+        include_images = include_images if include_images is not None else True
+        include_raw = include_raw if include_raw else "markdown"  # Include raw by default
+
     kwargs = {
         "query": query,
         "search_depth": depth,
@@ -355,9 +368,9 @@ def search(
 
     if time_range:
         kwargs["time_range"] = time_range
-    if include_answer:
+    if include_answer and include_answer.lower() not in ("false", "no", "0"):
         kwargs["include_answer"] = include_answer if include_answer not in ("true", "True") else True
-    if include_raw:
+    if include_raw and include_raw.lower() not in ("false", "no", "0"):
         kwargs["include_raw_content"] = include_raw if include_raw not in ("true", "True") else True
     if include_domains:
         kwargs["include_domains"] = include_domains

@@ -116,6 +116,11 @@ class TestSearch:
         assert "Test Result" in result.output
         mock_tavily_client.search.assert_called_once()
 
+        # Verify optimized defaults: max_results=20 and include_answer="basic"
+        call_kwargs = mock_tavily_client.search.call_args[1]
+        assert call_kwargs["max_results"] == 20
+        assert call_kwargs["include_answer"] == "basic"
+
     def test_search_with_options(self, runner, mock_tavily_client):
         mock_tavily_client.search.return_value = {
             "query": "test",
@@ -134,7 +139,7 @@ class TestSearch:
         assert call_kwargs["search_depth"] == "advanced"
         assert call_kwargs["topic"] == "news"
         assert call_kwargs["max_results"] == 10
-        assert call_kwargs["include_answer"] == "basic"
+        assert call_kwargs["include_answer"] == "advanced"  # -a flag now upgrades to advanced
 
     def test_search_json_output(self, runner, mock_tavily_client):
         mock_tavily_client.search.return_value = {
