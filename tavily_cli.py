@@ -27,6 +27,10 @@ TIME_RANGES = ["day", "week", "month", "year", "d", "w", "m", "y"]
 OUTPUT_FORMATS = ["json", "text", "markdown"]
 CONTENT_FORMATS = ["markdown", "text"]
 
+# Warn when JSON output exceeds this size — Claude Code's persisted-output threshold
+# is ~209KB; 150KB gives a comfortable buffer before truncation kicks in.
+CONTEXT_SAFE_OUTPUT_BYTES = 150_000
+
 CONFIG_DIR = os.path.expanduser("~/.config/tavily-cli")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.toml")
 
@@ -144,6 +148,22 @@ class TavilyCLI:
         except Exception as e:
             logger.warning("Could not write history file %s: %s", filepath, e)
 
+    def _warn_if_large(self, serialized: str) -> None:
+        """Emit a stderr warning when JSON output exceeds the context-safe threshold.
+
+        The warning is written to stderr so stdout remains valid JSON and can be
+        piped directly to ``jq`` or other tools without interference.
+        """
+        size = len(serialized.encode())
+        if size > CONTEXT_SAFE_OUTPUT_BYTES:
+            kb = size // 1024
+            click.echo(
+                f"Warning: output is {kb}KB (>{CONTEXT_SAFE_OUTPUT_BYTES // 1024}KB"
+                " context-safe limit). Use --compact, -n 5, or --include-raw=false"
+                " to reduce size.",
+                err=True,
+            )
+
     def get_usage(self) -> dict:
         """Get API usage information via REST API."""
         response = requests.get(
@@ -215,7 +235,9 @@ class TavilyCLI:
                 }
                 click.echo(json.dumps(stripped))
             else:
-                click.echo(json.dumps(response, indent=2))
+                serialized = json.dumps(response, indent=2)
+                self._warn_if_large(serialized)
+                click.echo(serialized)
             return
 
         is_md = self.output_format == "markdown"
@@ -306,7 +328,9 @@ class TavilyCLI:
                 for result in response.get("results", []):
                     if "raw_content" in result and result["raw_content"]:
                         result["raw_content"] = result["raw_content"][:max_content]
-            click.echo(json.dumps(response, indent=2))
+            serialized = json.dumps(response, indent=2)
+            self._warn_if_large(serialized)
+            click.echo(serialized)
             return
 
         is_md = self.output_format == "markdown"
@@ -361,7 +385,9 @@ class TavilyCLI:
     def display_crawl_results(self, response: dict) -> None:
         """Display crawl results in a readable format."""
         if self.output_format == "json":
-            click.echo(json.dumps(response, indent=2))
+            serialized = json.dumps(response, indent=2)
+            self._warn_if_large(serialized)
+            click.echo(serialized)
             return
 
         is_md = self.output_format == "markdown"
@@ -400,7 +426,9 @@ class TavilyCLI:
     def display_map_results(self, response: dict) -> None:
         """Display map results in a readable format."""
         if self.output_format == "json":
-            click.echo(json.dumps(response, indent=2))
+            serialized = json.dumps(response, indent=2)
+            self._warn_if_large(serialized)
+            click.echo(serialized)
             return
 
         is_md = self.output_format == "markdown"
