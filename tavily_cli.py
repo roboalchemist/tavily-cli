@@ -549,8 +549,8 @@ def cli(ctx, api_key: str, output_format: Optional[str], verbose: bool, no_histo
 @cli.command()
 @click.argument("query")
 @click.option("-m", "--minimal", is_flag=True, help="Minimal output for small context windows (5 results, no raw content, no images)")
-@click.option("--answer-only", is_flag=True, default=False, help="Return only the AI-synthesized answer string. Forces include_answer=advanced, suppresses results/images/raw_content.")
-@click.option("--compact", is_flag=True, default=False, help="Agent-friendly compact JSON: answer + top N results (title/url/content snippet). Sets include_raw_content=False server-side. Implies --top 5.")
+@click.option("--answer-only", is_flag=True, default=False, help="Print only the AI answer (forces advanced answer).")
+@click.option("--compact", is_flag=True, default=False, help="Agent-friendly compact JSON: answer + top N results (title/url/content only). Implies --top 5.")
 @click.option("--top", "top_n", type=click.IntRange(min=1), default=None, help="Return top N results (default 5 when --compact is set). Implies --compact.")
 @click.option("-d", "--depth", type=click.Choice(SEARCH_DEPTHS), default=None, help="Search depth (basic=1 credit, advanced=2 credits)")
 @click.option("-t", "--topic", type=click.Choice(SEARCH_TOPICS), default=None, help="Search topic")
@@ -562,7 +562,7 @@ def cli(ctx, api_key: str, output_format: Optional[str], verbose: bool, no_histo
 @click.option("--include-domains", callback=parse_list, help="Comma-separated domains to include")
 @click.option("--exclude-domains", callback=parse_list, help="Comma-separated domains to exclude")
 @click.option("--country", help="Boost results from country")
-@click.option("--urls-only", "urls_only", is_flag=True, default=False, help="Return only URLs (one per line). Disables raw content, images, and answer to save credits.")
+@click.option("--urls-only", "urls_only", is_flag=True, default=False, help="Print only URLs, one per line.")
 @pass_cli
 def search(
     tavily_cli: TavilyCLI,

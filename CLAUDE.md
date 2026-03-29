@@ -9,7 +9,7 @@ Public repo: `~/github/tavily-cli` → https://github.com/roboalchemist/tavily-c
 
 ```
 tavily-cli/
-├── tavily_cli.py            # Entire CLI — single-file implementation (554 lines)
+├── tavily_cli.py            # Entire CLI — single-file implementation (~826 lines)
 ├── requirements.txt         # Runtime deps: tavily-python, click, requests
 ├── requirements-dev.txt     # Dev deps: pytest, pytest-mock, ruff
 ├── Makefile                 # Task runner (install, test, lint, format, clean)
@@ -34,21 +34,24 @@ Wraps `TavilyClient` from `tavily-python` SDK and owns all display logic.
 
 ```python
 class TavilyCLI:
-    def __init__(self, api_key: str, output_format: str = "text")
+    def __init__(self, api_key: str, output_format: str = "text",
+                 history_enabled: bool = False, no_history: bool = False, config: dict = None)
     def get_usage(self) -> dict          # REST call to api.tavily.com/usage
+    def write_history(...)               # JSON envelope to dated history dir
     def display_search_results(...)      # text / json / markdown rendering
     def display_extract_results(...)
     def display_crawl_results(...)
     def display_map_results(...)
+    def display_urls_only(...)           # --urls-only display
     def display_usage(...)
 ```
 
 ### Click CLI Structure
 
 ```
-cli (group) [--api-key/-k, --format/-f, --verbose/-v]
-├── search  <query>         # Web search
-├── extract <url> [url...]  # Content extraction from URLs
+cli (group) [--api-key/-k, --format/-f, --verbose/-v, --no-history]
+├── search  <query>         # Web search (--compact, --top, --answer-only, --urls-only, -m)
+├── extract <url> [url...]  # Content extraction (--max-content)
 ├── crawl   <url>           # Spider a site, extract content
 ├── map     <url>           # Spider a site, return URLs only
 └── usage                   # Show API key/account usage stats
@@ -57,7 +60,9 @@ cli (group) [--api-key/-k, --format/-f, --verbose/-v]
 - Uses `click.make_pass_decorator(TavilyCLI)` to inject the client into commands
 - API key comes from `TAVILY_API_KEY` env var or `--api-key` flag
 - Three output formats: `text` (default, colored), `json`, `markdown`
-- Version: `1.1.1` (hardcoded in `@click.version_option`)
+- Version: `1.2.1` (hardcoded in `@click.version_option`)
+- Config: `~/.config/tavily-cli/config.toml` (optional, TOML via tomllib)
+- History: `~/.config/tavily-cli/history/<cmd>/<year>/<month>/<day>/` (opt-in)
 
 ### Helper
 
@@ -86,8 +91,8 @@ def parse_list(ctx, param, value: str) -> Optional[list]  # comma-separated → 
 
 | Command | Key Options |
 |---------|------------|
-| `search <query>` | `-d basic\|advanced`, `-t general\|news\|finance`, `-n 1-20`, `-a`, `-r`, `--time-range`, `--include-domains`, `--exclude-domains`, `-m` (minimal) |
-| `extract <url...>` | `-d basic\|advanced`, `--output-format markdown\|text`, `--include-images`, `--timeout` |
+| `search <query>` | `--compact`, `--top N`, `--answer-only`, `--urls-only`, `-m`, `-n N`, `-d basic\|advanced`, `-t general\|news\|finance`, `-a`, `--time-range`, `--include-domains`, `--exclude-domains` |
+| `extract <url...>` | `--max-content N`, `-d basic\|advanced`, `--output-format markdown\|text`, `--include-images`, `--timeout` |
 | `crawl <url>` | `-i instructions`, `--max-depth 1-5`, `--max-breadth`, `-n limit`, `--select-paths`, `--exclude-paths`, `--no-external`, `-d`, `--timeout` |
 | `map <url>` | `-i instructions`, `--max-depth 1-5`, `--max-breadth`, `-n limit`, `--select-paths`, `--exclude-paths`, `--no-external`, `--timeout` |
 | `usage` | (no options) |
