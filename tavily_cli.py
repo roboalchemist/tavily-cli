@@ -6,8 +6,14 @@ Tavily CLI - Command-line interface for the Tavily AI search API.
 import json
 import logging
 import os
+import re
+import socket
 import sys
+import time
+import tomllib
+from datetime import datetime, timezone
 from typing import Optional
+from urllib.parse import urlparse
 
 import click
 import requests
@@ -21,12 +27,121 @@ TIME_RANGES = ["day", "week", "month", "year", "d", "w", "m", "y"]
 OUTPUT_FORMATS = ["json", "text", "markdown"]
 CONTENT_FORMATS = ["markdown", "text"]
 
+CONFIG_DIR = os.path.expanduser("~/.config/tavily-cli")
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.toml")
+
+
+def load_config() -> dict:
+    """Load configuration from ~/.config/tavily-cli/config.toml.
+
+    Returns an empty dict if the file does not exist or cannot be parsed.
+    """
+    if not os.path.exists(CONFIG_FILE):
+        return {}
+    try:
+        with open(CONFIG_FILE, "rb") as f:
+            return tomllib.load(f)
+    except Exception as e:
+        logger.warning("Could not read config file %s: %s", CONFIG_FILE, e)
+        return {}
+
+
+def save_config(config: dict) -> None:
+    """Write configuration back to ~/.config/tavily-cli/config.toml.
+
+    Only the keys present in *config* are written; this is a full overwrite.
+    """
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    lines = []
+    for key, value in config.items():
+        if isinstance(value, bool):
+            lines.append(f"{key} = {'true' if value else 'false'}")
+        elif isinstance(value, (int, float)):
+            lines.append(f"{key} = {value}")
+        else:
+            escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+            lines.append(f'{key} = "{escaped}"')
+    try:
+        with open(CONFIG_FILE, "w") as f:
+            f.write("\n".join(lines) + "\n")
+    except Exception as e:
+        logger.warning("Could not write config file %s: %s", CONFIG_FILE, e)
+
+
+def _make_slug(command: str, params: dict) -> str:
+    """Generate a short filesystem-safe slug for a history filename."""
+    if command == "search":
+        raw = params.get("query", "")
+    else:
+        # extract / crawl / map — use the domain from the first URL
+        url_val = params.get("url") or (params.get("urls") or [""])[0]
+        raw = urlparse(url_val).netloc or url_val
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", raw).strip("-")
+    return slug[:40]
+
 
 class TavilyCLI:
-    def __init__(self, api_key: str, output_format: str = "text"):
+    def __init__(
+        self,
+        api_key: str,
+        output_format: str = "text",
+        history_enabled: bool = False,
+        no_history: bool = False,
+        config: Optional[dict] = None,
+    ):
         self.api_key = api_key
         self.client = TavilyClient(api_key=api_key)
         self.output_format = output_format
+        self.history_enabled = history_enabled
+        self.no_history = no_history
+        self.config = config or {}
+
+    def write_history(self, command: str, params: dict, response: dict, latency_ms: int) -> None:
+        """Write an API call to the history log under ~/.config/tavily-cli/history/.
+
+        No-ops when history is disabled or --no-history was passed.
+        """
+        if not self.history_enabled or self.no_history:
+            return
+
+        now = datetime.now(timezone.utc)
+        timestamp = now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+        year = now.strftime("%Y")
+        month = now.strftime("%m")
+        day = now.strftime("%d")
+        time_part = now.strftime("%H-%M-%S")
+
+        slug = _make_slug(command, params)
+        hostname = socket.gethostname()
+        # Sanitize hostname for use in a filename
+        safe_host = re.sub(r"[^a-zA-Z0-9._-]", "-", hostname)
+
+        history_dir = os.path.join(CONFIG_DIR, "history", command, year, month, day)
+        os.makedirs(history_dir, exist_ok=True)
+
+        filename = f"{time_part}_{slug}_{safe_host}.json"
+        filepath = os.path.join(history_dir, filename)
+
+        # Sanitize params — remove api_key if somehow present
+        clean_params = {k: v for k, v in params.items() if k != "api_key"}
+
+        envelope = {
+            "meta": {
+                "timestamp": timestamp,
+                "hostname": hostname,
+                "command": command,
+                "params": clean_params,
+                "latency_ms": latency_ms,
+            },
+            "response": response,
+        }
+
+        try:
+            with open(filepath, "w") as f:
+                json.dump(envelope, f, indent=2)
+            logger.debug("History written to %s", filepath)
+        except Exception as e:
+            logger.warning("Could not write history file %s: %s", filepath, e)
 
     def get_usage(self) -> dict:
         """Get API usage information via REST API."""
@@ -289,11 +404,12 @@ pass_cli = click.make_pass_decorator(TavilyCLI, ensure=True)
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 @click.option("-k", "--api-key", envvar="TAVILY_API_KEY", help="Tavily API key (default: $TAVILY_API_KEY)")
-@click.option("-f", "--format", "output_format", type=click.Choice(OUTPUT_FORMATS), default="text", help="Output format")
+@click.option("-f", "--format", "output_format", type=click.Choice(OUTPUT_FORMATS), default=None, help="Output format")
 @click.option("-v", "--verbose", is_flag=True, help="Enable debug output")
+@click.option("--no-history", is_flag=True, default=False, help="Skip writing history for this invocation")
 @click.version_option(version="1.1.1")
 @click.pass_context
-def cli(ctx, api_key: str, output_format: str, verbose: bool):
+def cli(ctx, api_key: str, output_format: Optional[str], verbose: bool, no_history: bool):
     """Tavily CLI - AI-powered search from the command line.
 
     Get your free API key at: https://app.tavily.com
@@ -305,23 +421,40 @@ def cli(ctx, api_key: str, output_format: str, verbose: bool):
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
+    # Load config file and apply defaults (CLI flag > env var > config > hardcoded default)
+    config = load_config()
+
+    if not api_key:
+        api_key = config.get("api_key")
+
+    if output_format is None:
+        output_format = config.get("default_format", "text")
+
+    history_enabled = config.get("history_enabled", False)
+
     if not api_key:
         click.secho("Error: No API key provided.", fg="red", err=True)
         click.echo("Set TAVILY_API_KEY environment variable or use --api-key option.", err=True)
         click.echo("Get your free API key at: https://app.tavily.com", err=True)
         ctx.exit(1)
 
-    ctx.obj = TavilyCLI(api_key=api_key, output_format=output_format)
+    ctx.obj = TavilyCLI(
+        api_key=api_key,
+        output_format=output_format,
+        history_enabled=history_enabled,
+        no_history=no_history,
+        config=config,
+    )
 
 
 @cli.command()
 @click.argument("query")
 @click.option("-m", "--minimal", is_flag=True, help="Minimal output for small context windows (5 results, no raw content, no images)")
-@click.option("-d", "--depth", type=click.Choice(SEARCH_DEPTHS), default="basic", help="Search depth (basic=1 credit, advanced=2 credits)")
-@click.option("-t", "--topic", type=click.Choice(SEARCH_TOPICS), default="general", help="Search topic")
-@click.option("-n", "--max-results", type=click.IntRange(1, 20), default=20, help="Maximum results (1-20). All same price.")
+@click.option("-d", "--depth", type=click.Choice(SEARCH_DEPTHS), default=None, help="Search depth (basic=1 credit, advanced=2 credits)")
+@click.option("-t", "--topic", type=click.Choice(SEARCH_TOPICS), default=None, help="Search topic")
+@click.option("-n", "--max-results", type=click.IntRange(1, 20), default=None, help="Maximum results (1-20). All same price.")
 @click.option("--time-range", type=click.Choice(TIME_RANGES), help="Filter by time range")
-@click.option("-a", "--include-answer", is_flag=False, flag_value="advanced", default="basic", help="LLM answer: basic (default), advanced (-a), or --include-answer=false to disable. Free with search.")
+@click.option("-a", "--advanced-answer", "advanced_answer", is_flag=True, default=False, help="Use advanced LLM answer (default: basic). -a upgrades to advanced. Free with search.")
 @click.option("-r", "--include-raw", is_flag=False, flag_value="markdown", default="markdown", help="Raw content: markdown (default), text, or --include-raw=false to disable. Free with search.")
 @click.option("--include-images/--no-images", default=None, help="Include image results (free with search)")
 @click.option("--include-domains", callback=parse_list, help="Comma-separated domains to include")
@@ -332,11 +465,11 @@ def search(
     tavily_cli: TavilyCLI,
     query: str,
     minimal: bool,
-    depth: str,
-    topic: str,
+    depth: Optional[str],
+    topic: Optional[str],
     max_results: Optional[int],
     time_range: Optional[str],
-    include_answer: Optional[str],
+    advanced_answer: bool,
     include_raw: Optional[str],
     include_images: Optional[bool],
     include_domains: Optional[list],
@@ -348,13 +481,20 @@ def search(
     Example: tavily search "who is Leo Messi?"
     Example: tavily search "python frameworks" -m  # minimal output
     """
+    # Apply config defaults then hardcoded defaults (CLI flag > config > hardcoded)
+    depth = depth or tavily_cli.config.get("default_depth", "basic")
+    topic = topic or tavily_cli.config.get("default_topic", "general")
+
+    # Resolve include_answer: -a flag upgrades to advanced, otherwise basic
+    include_answer = "advanced" if advanced_answer else "basic"
+
     # Apply defaults based on minimal flag
     if minimal:
-        max_results = max_results if max_results is not None else 5
+        max_results = max_results or tavily_cli.config.get("default_max_results") or 5
         include_images = include_images if include_images is not None else False
         include_raw = include_raw if include_raw else None  # No raw content in minimal
     else:
-        max_results = max_results if max_results is not None else 20
+        max_results = max_results or tavily_cli.config.get("default_max_results") or 20
         include_images = include_images if include_images is not None else True
         include_raw = include_raw if include_raw else "markdown"  # Include raw by default
 
@@ -368,8 +508,7 @@ def search(
 
     if time_range:
         kwargs["time_range"] = time_range
-    if include_answer and include_answer.lower() not in ("false", "no", "0"):
-        kwargs["include_answer"] = include_answer if include_answer not in ("true", "True") else True
+    kwargs["include_answer"] = include_answer
     if include_raw and include_raw.lower() not in ("false", "no", "0"):
         kwargs["include_raw_content"] = include_raw if include_raw not in ("true", "True") else True
     if include_domains:
@@ -380,7 +519,10 @@ def search(
         kwargs["country"] = country
 
     logger.debug(f"Search kwargs: {kwargs}")
+    t0 = time.time()
     response = tavily_cli.client.search(**kwargs)
+    latency_ms = int((time.time() - t0) * 1000)
+    tavily_cli.write_history("search", kwargs, response, latency_ms)
     tavily_cli.display_search_results(response)
 
 
@@ -413,7 +555,10 @@ def extract(
         kwargs["timeout"] = timeout
 
     logger.debug(f"Extract kwargs: {kwargs}")
+    t0 = time.time()
     response = tavily_cli.client.extract(**kwargs)
+    latency_ms = int((time.time() - t0) * 1000)
+    tavily_cli.write_history("extract", kwargs, response, latency_ms)
     tavily_cli.display_extract_results(response)
 
 
@@ -476,7 +621,10 @@ def crawl(
         kwargs["timeout"] = timeout
 
     logger.debug(f"Crawl kwargs: {kwargs}")
+    t0 = time.time()
     response = tavily_cli.client.crawl(**kwargs)
+    latency_ms = int((time.time() - t0) * 1000)
+    tavily_cli.write_history("crawl", kwargs, response, latency_ms)
     tavily_cli.display_crawl_results(response)
 
 
@@ -533,7 +681,10 @@ def map_cmd(
         kwargs["timeout"] = timeout
 
     logger.debug(f"Map kwargs: {kwargs}")
+    t0 = time.time()
     response = tavily_cli.client.map(**kwargs)
+    latency_ms = int((time.time() - t0) * 1000)
+    tavily_cli.write_history("map", kwargs, response, latency_ms)
     tavily_cli.display_map_results(response)
 
 
