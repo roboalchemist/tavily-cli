@@ -18,6 +18,22 @@ def runner():
     return CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def isolated_config(tmp_path):
+    """Redirect all config/history writes to a temp dir for every test.
+
+    History is enabled by default (principle: store everything). Without this
+    fixture every test would write real history files and emit [history] paths
+    to stderr, polluting output assertions. Tests that want to inspect history
+    behaviour use their own tmp_path patches which override these module-level
+    patches within their context managers.
+    """
+    config_file = tmp_path / "config.toml"
+    with patch("tavily_cli.CONFIG_DIR", str(tmp_path)), \
+         patch("tavily_cli.CONFIG_FILE", str(config_file)):
+        yield tmp_path
+
+
 @pytest.fixture
 def mock_tavily_client():
     """Create a mock TavilyClient."""
@@ -119,10 +135,11 @@ class TestSearch:
         assert "Test Result" in result.output
         mock_tavily_client.search.assert_called_once()
 
-        # Verify defaults: max_results=5 (new default), include_answer="basic"
+        # Principle: always fetch max from API regardless of display settings
         call_kwargs = mock_tavily_client.search.call_args[1]
-        assert call_kwargs["max_results"] == 5
+        assert call_kwargs["max_results"] == 20
         assert call_kwargs["include_answer"] == "basic"
+        assert call_kwargs.get("include_raw_content") == "markdown"
 
     def test_search_with_options(self, runner, mock_tavily_client):
         mock_tavily_client.search.return_value = {
@@ -141,8 +158,9 @@ class TestSearch:
         call_kwargs = mock_tavily_client.search.call_args[1]
         assert call_kwargs["search_depth"] == "advanced"
         assert call_kwargs["topic"] == "news"
-        assert call_kwargs["max_results"] == 10
-        assert call_kwargs["include_answer"] == "advanced"  # -a flag now upgrades to advanced
+        # API always fetches max=20 regardless of -n (display cap is client-side)
+        assert call_kwargs["max_results"] == 20
+        assert call_kwargs["include_answer"] == "advanced"  # -a flag upgrades to advanced
 
     def test_search_json_output(self, runner, mock_tavily_client):
         mock_tavily_client.search.return_value = {
@@ -153,7 +171,7 @@ class TestSearch:
 
         result = runner.invoke(cli, ["-k", "test-key", "-f", "json", "search", "test"])
         assert result.exit_code == 0
-        output = json.loads(result.output)
+        output = json.loads(result.stdout)
         assert output["query"] == "test"
 
 
@@ -179,48 +197,50 @@ class TestSearchCompact:
             "response_time": 1.0,
         }
 
-    def test_compact_flag_sets_include_raw_content_false(self, runner, mock_tavily_client):
-        """--compact must pass include_raw_content=False to the API."""
+    def test_compact_api_always_fetches_max(self, runner, mock_tavily_client):
+        """--compact must still pass max_results=20 to the API (display is capped client-side)."""
         mock_tavily_client.search.return_value = self._mock_response()
         result = runner.invoke(cli, ["-k", "test-key", "-f", "json", "search", "test query", "--compact"])
         assert result.exit_code == 0
         call_kwargs = mock_tavily_client.search.call_args[1]
-        assert call_kwargs.get("include_raw_content") is False
+        assert call_kwargs["max_results"] == 20
+        assert call_kwargs.get("include_raw_content") == "markdown"
 
-    def test_compact_flag_sets_include_images_false(self, runner, mock_tavily_client):
-        """--compact must disable images in the API request."""
-        mock_tavily_client.search.return_value = self._mock_response()
-        runner.invoke(cli, ["-k", "test-key", "-f", "json", "search", "test query", "--compact"])
-        call_kwargs = mock_tavily_client.search.call_args[1]
-        assert call_kwargs.get("include_images") is False
+    def test_compact_default_top_5_in_output(self, runner, mock_tavily_client):
+        """--compact without --top defaults to 5 results in the *output* (client-side cap)."""
+        mock_tavily_client.search.return_value = self._mock_response(n=7)
+        result = runner.invoke(cli, ["-k", "test-key", "-f", "json", "search", "test query", "--compact"])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout)
+        assert len(data["results"]) == 5
 
-    def test_compact_default_top_5(self, runner, mock_tavily_client):
-        """--compact without --top defaults to 5 results."""
-        mock_tavily_client.search.return_value = self._mock_response()
-        runner.invoke(cli, ["-k", "test-key", "-f", "json", "search", "test query", "--compact"])
+    def test_top_n_caps_display_not_api(self, runner, mock_tavily_client):
+        """--top 3 trims the output to 3 results but API is still called with max_results=20."""
+        mock_tavily_client.search.return_value = self._mock_response(n=7)
+        result = runner.invoke(cli, ["-k", "test-key", "-f", "json", "search", "test query", "--top", "3"])
+        assert result.exit_code == 0
+        # API: always 20
         call_kwargs = mock_tavily_client.search.call_args[1]
-        assert call_kwargs.get("max_results") == 5
+        assert call_kwargs["max_results"] == 20
+        # Output: trimmed to 3
+        data = json.loads(result.stdout)
+        assert len(data["results"]) == 3
 
-    def test_top_n_sets_max_results(self, runner, mock_tavily_client):
-        """--top 3 must pass max_results=3 to the API."""
-        mock_tavily_client.search.return_value = self._mock_response(n=3)
-        runner.invoke(cli, ["-k", "test-key", "-f", "json", "search", "test query", "--top", "3"])
-        call_kwargs = mock_tavily_client.search.call_args[1]
-        assert call_kwargs.get("max_results") == 3
-
-    def test_top_n_implies_compact(self, runner, mock_tavily_client):
-        """--top N without explicit --compact should still set include_raw_content=False."""
-        mock_tavily_client.search.return_value = self._mock_response(n=3)
-        runner.invoke(cli, ["-k", "test-key", "-f", "json", "search", "test query", "--top", "3"])
-        call_kwargs = mock_tavily_client.search.call_args[1]
-        assert call_kwargs.get("include_raw_content") is False
+    def test_top_n_implies_compact_output_shape(self, runner, mock_tavily_client):
+        """--top N without explicit --compact produces compact output shape."""
+        mock_tavily_client.search.return_value = self._mock_response(n=7)
+        result = runner.invoke(cli, ["-k", "test-key", "-f", "json", "search", "test query", "--top", "3"])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout)
+        for r in data["results"]:
+            assert "raw_content" not in r
 
     def test_compact_json_output_shape(self, runner, mock_tavily_client):
         """--compact with -f json must emit {answer, results:[{title,url,content}]} only."""
-        mock_tavily_client.search.return_value = self._mock_response()
+        mock_tavily_client.search.return_value = self._mock_response(n=7)
         result = runner.invoke(cli, ["-k", "test-key", "-f", "json", "search", "test query", "--compact"])
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
         assert set(data.keys()) == {"answer", "results"}
         assert data["answer"] == "This is the answer."
         assert len(data["results"]) == 5
@@ -229,38 +249,38 @@ class TestSearchCompact:
 
     def test_compact_json_content_truncated_to_200(self, runner, mock_tavily_client):
         """Content field in compact JSON output must be at most 200 chars."""
-        mock_tavily_client.search.return_value = self._mock_response()
+        mock_tavily_client.search.return_value = self._mock_response(n=7)
         result = runner.invoke(cli, ["-k", "test-key", "-f", "json", "search", "test query", "--compact"])
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
         for r in data["results"]:
             assert len(r["content"]) <= 200
 
     def test_compact_json_no_raw_content_in_output(self, runner, mock_tavily_client):
         """Compact JSON output must not contain raw_content key in results."""
-        mock_tavily_client.search.return_value = self._mock_response()
+        mock_tavily_client.search.return_value = self._mock_response(n=7)
         result = runner.invoke(cli, ["-k", "test-key", "-f", "json", "search", "test query", "--compact"])
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
         for r in data["results"]:
             assert "raw_content" not in r
             assert "score" not in r
 
     def test_compact_output_size_under_10kb(self, runner, mock_tavily_client):
         """Compact output for 5 results must be under 10KB."""
-        mock_tavily_client.search.return_value = self._mock_response()
+        mock_tavily_client.search.return_value = self._mock_response(n=7)
         result = runner.invoke(cli, ["-k", "test-key", "-f", "json", "search", "test query", "--compact"])
         assert result.exit_code == 0
-        assert len(result.output.encode("utf-8")) < 10 * 1024
+        assert len(result.stdout.encode("utf-8")) < 10 * 1024
 
     def test_top_3_compact_json_has_3_results(self, runner, mock_tavily_client):
         """--top 3 with -f json must return exactly 3 results in compact shape."""
-        mock_tavily_client.search.return_value = self._mock_response(n=3)
+        mock_tavily_client.search.return_value = self._mock_response(n=7)
         result = runner.invoke(
             cli, ["-k", "test-key", "-f", "json", "search", "test query", "--compact", "--top", "3"]
         )
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
         assert len(data["results"]) == 3
 
     def test_compact_appears_in_search_help(self, runner):
@@ -277,14 +297,13 @@ class TestSearchCompact:
 
     def test_minimal_flag_unchanged_with_compact(self, runner, mock_tavily_client):
         """Existing --minimal flag behavior must still work (unchanged)."""
-        mock_tavily_client.search.return_value = self._mock_response()
+        mock_tavily_client.search.return_value = self._mock_response(n=7)
         result = runner.invoke(cli, ["-k", "test-key", "search", "test query", "-m"])
         assert result.exit_code == 0
         call_kwargs = mock_tavily_client.search.call_args[1]
-        # Minimal sets max_results=5 and include_images=False, but does NOT set include_raw_content=False
-        assert call_kwargs.get("max_results") == 5
-        assert call_kwargs.get("include_images") is False
-        assert "include_raw_content" not in call_kwargs or call_kwargs.get("include_raw_content") is not False
+        # API always fetches max=20 with raw content (principle: get everything we paid for)
+        assert call_kwargs["max_results"] == 20
+        assert call_kwargs.get("include_raw_content") == "markdown"
 
 
 class TestSearchAnswerOnly:
@@ -314,7 +333,7 @@ class TestSearchAnswerOnly:
         mock_tavily_client.search.return_value = self._mock_response()
         result = runner.invoke(cli, ["-k", "test-key", "search", "who is Leo Messi?", "--answer-only"])
         assert result.exit_code == 0
-        assert result.output.strip() == self.MOCK_ANSWER
+        assert result.stdout.strip() == self.MOCK_ANSWER
 
     def test_answer_only_text_no_results(self, runner, mock_tavily_client):
         """--answer-only text output must not contain result titles or URLs."""
@@ -332,7 +351,7 @@ class TestSearchAnswerOnly:
             cli, ["-k", "test-key", "-f", "json", "search", "who is Leo Messi?", "--answer-only"]
         )
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
         assert set(data.keys()) == {"answer"}
         assert data["answer"] == self.MOCK_ANSWER
 
@@ -354,20 +373,13 @@ class TestSearchAnswerOnly:
         call_kwargs = mock_tavily_client.search.call_args[1]
         assert call_kwargs.get("include_answer") == "advanced"
 
-    def test_answer_only_suppresses_images(self, runner, mock_tavily_client):
-        """--answer-only must pass include_images=False to avoid wasting credits."""
+    def test_answer_only_api_still_fetches_everything(self, runner, mock_tavily_client):
+        """--answer-only still fetches max results + raw content (stored in history, display-only cap)."""
         mock_tavily_client.search.return_value = self._mock_response()
         runner.invoke(cli, ["-k", "test-key", "search", "who is Leo Messi?", "--answer-only"])
         call_kwargs = mock_tavily_client.search.call_args[1]
-        assert call_kwargs.get("include_images") is False
-
-    def test_answer_only_suppresses_raw_content(self, runner, mock_tavily_client):
-        """--answer-only must not request raw_content to avoid wasting credits."""
-        mock_tavily_client.search.return_value = self._mock_response()
-        runner.invoke(cli, ["-k", "test-key", "search", "who is Leo Messi?", "--answer-only"])
-        call_kwargs = mock_tavily_client.search.call_args[1]
-        # include_raw_content should either be absent or False (never truthy)
-        assert not call_kwargs.get("include_raw_content")
+        assert call_kwargs["max_results"] == 20
+        assert call_kwargs.get("include_raw_content") == "markdown"
 
     def test_answer_only_exits_nonzero_when_no_answer(self, runner, mock_tavily_client):
         """--answer-only must exit non-zero when API returns no answer."""
@@ -395,8 +407,8 @@ class TestSearchAnswerOnly:
         )
         result = runner.invoke(cli, ["-k", "test-key", "search", "who is Leo Messi?", "--answer-only"])
         assert result.exit_code == 0
-        # output ends with a single newline from click.echo, answer itself is stripped
-        assert result.output == "Leo Messi is great.\n"
+        # stdout ends with a single newline from click.echo, answer itself is stripped
+        assert result.stdout == "Leo Messi is great.\n"
 
 
 class TestSearchUrlsOnly:
@@ -425,15 +437,15 @@ class TestSearchUrlsOnly:
         mock_tavily_client.search.return_value = self._mock_response()
         result = runner.invoke(cli, ["-k", "test-key", "search", "test query", "--urls-only"])
         assert result.exit_code == 0
-        lines = result.output.strip().splitlines()
+        lines = result.stdout.strip().splitlines()
         assert lines == [
             "https://example.com/1",
             "https://example.com/2",
             "https://example.com/3",
         ]
         # Must not contain titles, scores, or answer text
-        assert "Result" not in result.output
-        assert "answer" not in result.output.lower()
+        assert "Result" not in result.stdout
+        assert "answer" not in result.stdout.lower()
 
     def test_urls_only_json_output(self, runner, mock_tavily_client):
         """--urls-only with -f json emits {\"urls\": [...]} only."""
@@ -442,7 +454,7 @@ class TestSearchUrlsOnly:
             cli, ["-k", "test-key", "-f", "json", "search", "test query", "--urls-only"]
         )
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
         assert set(data.keys()) == {"urls"}
         assert data["urls"] == [
             "https://example.com/1",
@@ -457,33 +469,22 @@ class TestSearchUrlsOnly:
             cli, ["-k", "test-key", "-f", "markdown", "search", "test query", "--urls-only"]
         )
         assert result.exit_code == 0
-        lines = result.output.strip().splitlines()
+        lines = result.stdout.strip().splitlines()
         assert lines == [
             "- https://example.com/1",
             "- https://example.com/2",
             "- https://example.com/3",
         ]
 
-    def test_urls_only_disables_raw_content_in_api_call(self, runner, mock_tavily_client):
-        """--urls-only must pass include_raw_content=False to the API."""
+    def test_urls_only_api_always_fetches_everything(self, runner, mock_tavily_client):
+        """--urls-only still fetches raw content, images, and answer (stored in history)."""
         mock_tavily_client.search.return_value = self._mock_response()
         runner.invoke(cli, ["-k", "test-key", "search", "test query", "--urls-only"])
         call_kwargs = mock_tavily_client.search.call_args[1]
-        assert call_kwargs.get("include_raw_content") is False
-
-    def test_urls_only_disables_images_in_api_call(self, runner, mock_tavily_client):
-        """--urls-only must pass include_images=False to the API."""
-        mock_tavily_client.search.return_value = self._mock_response()
-        runner.invoke(cli, ["-k", "test-key", "search", "test query", "--urls-only"])
-        call_kwargs = mock_tavily_client.search.call_args[1]
-        assert call_kwargs.get("include_images") is False
-
-    def test_urls_only_disables_answer_in_api_call(self, runner, mock_tavily_client):
-        """--urls-only must pass include_answer=False to the API."""
-        mock_tavily_client.search.return_value = self._mock_response()
-        runner.invoke(cli, ["-k", "test-key", "search", "test query", "--urls-only"])
-        call_kwargs = mock_tavily_client.search.call_args[1]
-        assert call_kwargs.get("include_answer") is False
+        assert call_kwargs.get("include_raw_content") == "markdown"
+        assert call_kwargs.get("include_images") is True
+        assert call_kwargs.get("include_answer") == "basic"
+        assert call_kwargs["max_results"] == 20
 
     def test_urls_only_combines_with_depth(self, runner, mock_tavily_client):
         """--urls-only combines correctly with -d advanced."""
@@ -493,16 +494,23 @@ class TestSearchUrlsOnly:
         )
         call_kwargs = mock_tavily_client.search.call_args[1]
         assert call_kwargs["search_depth"] == "advanced"
-        assert call_kwargs.get("include_raw_content") is False
+        assert call_kwargs.get("include_raw_content") == "markdown"
 
-    def test_urls_only_combines_with_max_results(self, runner, mock_tavily_client):
-        """--urls-only combines correctly with -n."""
-        mock_tavily_client.search.return_value = self._mock_response()
-        runner.invoke(
-            cli, ["-k", "test-key", "search", "test query", "--urls-only", "-n", "3"]
+    def test_urls_only_n_caps_display(self, runner, mock_tavily_client):
+        """--urls-only with -n caps the displayed URLs client-side; API still fetches 20."""
+        # Use a mock with more results than the display cap so trimming is visible
+        mock_tavily_client.search.return_value = {
+            "query": "test query",
+            "results": [{"url": f"https://example.com/{i}", "title": f"R{i}", "content": "x", "score": 0.9} for i in range(1, 6)],
+            "response_time": 1.0,
+        }
+        result = runner.invoke(
+            cli, ["-k", "test-key", "search", "test query", "--urls-only", "-n", "2"]
         )
+        assert result.exit_code == 0
         call_kwargs = mock_tavily_client.search.call_args[1]
-        assert call_kwargs["max_results"] == 3
+        assert call_kwargs["max_results"] == 20
+        assert len(result.stdout.strip().splitlines()) == 2
 
     def test_urls_only_appears_in_search_help(self, runner):
         """--urls-only should appear in search command help."""
@@ -515,8 +523,7 @@ class TestSearchUrlsOnly:
         mock_tavily_client.search.return_value = {"query": "test", "results": [], "response_time": 0.5}
         result = runner.invoke(cli, ["-k", "test-key", "search", "test query", "--urls-only"])
         assert result.exit_code == 0
-        # text: empty; json: {"urls": []}; markdown: empty
-        assert result.output.strip() == ""
+        assert result.stdout.strip() == ""
 
     def test_urls_only_empty_results_json(self, runner, mock_tavily_client):
         """--urls-only -f json with no results emits {\"urls\": []}."""
@@ -525,7 +532,7 @@ class TestSearchUrlsOnly:
             cli, ["-k", "test-key", "-f", "json", "search", "test query", "--urls-only"]
         )
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
         assert data == {"urls": []}
 
 
@@ -641,7 +648,7 @@ class TestExtractMaxContent:
             ["-k", "test-key", "-f", "json", "extract", "https://example.com", "--max-content", "150"],
         )
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
         assert len(data["results"][0]["raw_content"]) == 150
         assert "[truncated" not in data["results"][0]["raw_content"]
 
@@ -657,7 +664,7 @@ class TestExtractMaxContent:
             ["-k", "test-key", "-f", "json", "extract", "https://example.com", "--max-content", "1000"],
         )
         assert result.exit_code == 0
-        data = json.loads(result.output)
+        data = json.loads(result.stdout)
         assert data["results"][0]["raw_content"] == "short"
 
     def test_max_content_appears_in_help(self, runner):
@@ -987,16 +994,16 @@ class TestCLIConfigIntegration:
         assert result.exit_code == 0
         assert "--no-history" in result.output
 
-    def test_history_not_written_by_default(self, tmp_path, mock_tavily_client):
-        """No history files should be written when history_enabled is not set in config."""
+    def test_history_written_by_default(self, tmp_path, mock_tavily_client):
+        """History files should be written by default (history_enabled defaults to True)."""
         mock_tavily_client.search.return_value = {"query": "test", "results": [], "response_time": 1.0}
         runner = CliRunner()
         with patch("tavily_cli.CONFIG_FILE", "/nonexistent/config.toml"), \
              patch("tavily_cli.CONFIG_DIR", str(tmp_path)):
             result = runner.invoke(cli, ["-k", "test-key", "search", "test"])
         assert result.exit_code == 0
-        history_dir = tmp_path / "history"
-        assert not history_dir.exists()
+        files = list((tmp_path / "history").rglob("*.json"))
+        assert len(files) == 1
 
     def test_history_written_when_enabled_in_config(self, tmp_path, mock_tavily_client):
         """History files should be written when history_enabled = true in config."""
@@ -1093,11 +1100,13 @@ class TestHistoryStderr:
         assert "[history]" in result.stderr
         assert "map" in result.stderr
 
-    def test_no_stderr_when_history_disabled(self, tmp_path, mock_tavily_client):
-        """No [history] line emitted when history is not enabled."""
+    def test_no_stderr_when_history_explicitly_disabled(self, tmp_path, mock_tavily_client):
+        """No [history] line emitted when history_enabled = false in config."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("history_enabled = false\n")
         mock_tavily_client.search.return_value = {"query": "test", "results": [], "response_time": 1.0}
         runner = CliRunner()
-        with patch("tavily_cli.CONFIG_FILE", "/nonexistent/config.toml"), \
+        with patch("tavily_cli.CONFIG_FILE", str(config_file)), \
              patch("tavily_cli.CONFIG_DIR", str(tmp_path)):
             result = runner.invoke(cli, ["-k", "test-key", "search", "test"])
         assert result.exit_code == 0
@@ -1361,25 +1370,27 @@ class TestHistoryFullFetch:
         stored = json.loads(history_files[0].read_text())
         assert len(stored["response"]["results"]) == 20
 
-    def test_history_disabled_respects_user_n(self, tmp_path, mock_tavily_client):
-        """With history off, -n 3 is passed as max_results=3 to the API (no override)."""
+    def test_always_fetches_20_regardless_of_history_setting(self, tmp_path, mock_tavily_client):
+        """API always fetches max=20 regardless of history setting (principle: get what we paid for)."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("history_enabled = false\n")
         mock_tavily_client.search.return_value = {
-            "query": "test", "results": self._make_results(3), "response_time": 0.5
+            "query": "test", "results": self._make_results(20), "response_time": 0.5
         }
         runner = CliRunner()
-        with patch("tavily_cli.CONFIG_FILE", "/nonexistent/config.toml"), \
+        with patch("tavily_cli.CONFIG_FILE", str(config_file)), \
              patch("tavily_cli.CONFIG_DIR", str(tmp_path)):
             result = runner.invoke(cli, ["-k", "test-key", "search", "test", "-n", "3"])
         assert result.exit_code == 0
         call_kwargs = mock_tavily_client.search.call_args[1]
-        assert call_kwargs["max_results"] == 3
+        assert call_kwargs["max_results"] == 20
 
-    def test_no_history_flag_overrides_full_fetch(self, tmp_path, mock_tavily_client):
-        """--no-history suppresses full-fetch override even when config has history_enabled=true."""
+    def test_no_history_flag_does_not_change_api_fetch(self, tmp_path, mock_tavily_client):
+        """--no-history only skips writing; API still fetches 20."""
         config_file = tmp_path / "config.toml"
         config_file.write_text("history_enabled = true\n")
         mock_tavily_client.search.return_value = {
-            "query": "test", "results": self._make_results(3), "response_time": 0.5
+            "query": "test", "results": self._make_results(20), "response_time": 0.5
         }
         runner = CliRunner()
         with patch("tavily_cli.CONFIG_FILE", str(config_file)), \
@@ -1387,4 +1398,4 @@ class TestHistoryFullFetch:
             result = runner.invoke(cli, ["-k", "test-key", "--no-history", "search", "test", "-n", "3"])
         assert result.exit_code == 0
         call_kwargs = mock_tavily_client.search.call_args[1]
-        assert call_kwargs["max_results"] == 3
+        assert call_kwargs["max_results"] == 20

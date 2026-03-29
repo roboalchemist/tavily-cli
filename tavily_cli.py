@@ -529,7 +529,7 @@ def cli(ctx, api_key: str, output_format: Optional[str], verbose: bool, no_histo
     if output_format is None:
         output_format = config.get("default_format", "text")
 
-    history_enabled = config.get("history_enabled", False)
+    history_enabled = config.get("history_enabled", True)
 
     if not api_key:
         click.secho("Error: No API key provided.", fg="red", err=True)
@@ -554,7 +554,7 @@ def cli(ctx, api_key: str, output_format: Optional[str], verbose: bool, no_histo
 @click.option("--top", "top_n", type=click.IntRange(min=1), default=None, help="Return top N results (default 5 when --compact is set). Implies --compact.")
 @click.option("-d", "--depth", type=click.Choice(SEARCH_DEPTHS), default=None, help="Search depth (basic=1 credit, advanced=2 credits)")
 @click.option("-t", "--topic", type=click.Choice(SEARCH_TOPICS), default=None, help="Search topic")
-@click.option("-n", "--max-results", type=click.IntRange(min=1), default=5, help="Maximum results (default: 5).")
+@click.option("-n", "--max-results", type=click.IntRange(min=1), default=None, help="Maximum results to display (default: 5). API always fetches 20.")
 @click.option("--time-range", type=click.Choice(TIME_RANGES), help="Filter by time range")
 @click.option("-a", "--advanced-answer", "advanced_answer", is_flag=True, default=False, help="Use advanced AI answer instead of basic (basic included by default, both free with search).")
 @click.option("-r", "--include-raw", is_flag=False, flag_value="markdown", default="markdown", help="Raw content: markdown (default), text, or --include-raw=false to disable. Free with search.")
@@ -600,59 +600,27 @@ def search(
     depth = depth or tavily_cli.config.get("default_depth", "basic")
     topic = topic or tavily_cli.config.get("default_topic", "general")
 
-    # Resolve include_answer: answer_only and -a both force advanced
-    include_answer = "advanced" if (answer_only or advanced_answer) else "basic"
-
-    # --answer-only: suppress everything we'll discard to save credits
+    # Determine display limits (client-side only — never affects what we fetch)
     if answer_only:
-        include_images = False
-        include_raw = None  # will not set include_raw_content below
-
-    # --urls-only: suppress content, images, and answer — just URLs
-    if urls_only:
-        include_images = False
-        include_raw = None  # will be explicitly disabled below
-        advanced_answer = False
-
-    # Apply defaults based on compact flag (compact takes priority over minimal for raw/images)
-    if answer_only:
-        pass  # already handled above
-    elif compact:
-        max_results = top_n or 5
-        include_images = False
-        include_raw = None  # will be explicitly set to False below
-    elif minimal:
-        max_results = max_results or tavily_cli.config.get("default_max_results") or 5
-        include_images = include_images if include_images is not None else False
-        include_raw = include_raw if include_raw else None  # No raw content in minimal
+        display_max = 0  # results irrelevant, only answer shown
     else:
-        include_images = include_images if include_images is not None else True
-        include_raw = include_raw if include_raw else "markdown"  # Include raw by default
+        display_max = max_results or top_n or tavily_cli.config.get("default_max_results") or 5
 
+    # Principle: always fetch the maximum the API will give for 1 credit.
+    # 20 results + raw content (markdown) + basic answer are all free with a basic search.
+    # Display is capped client-side; the full response goes to history.
+    include_answer = "advanced" if (answer_only or advanced_answer) else "basic"
     kwargs = {
         "query": query,
         "search_depth": depth,
         "topic": topic,
-        "include_images": include_images,
+        "max_results": 20,
+        "include_answer": include_answer,
+        "include_raw_content": "markdown",
+        "include_images": include_images if include_images is not None else True,
     }
-    if max_results is not None:
-        kwargs["max_results"] = max_results
-
     if time_range:
         kwargs["time_range"] = time_range
-    kwargs["include_answer"] = include_answer
-
-    # urls-only mode: disable raw content, images, and answer at the API level
-    if urls_only:
-        kwargs["include_raw_content"] = False
-        kwargs["include_answer"] = False
-    # Compact mode explicitly disables raw_content at the API level to avoid
-    # fetching data we'll discard, keeping responses small and API cost low.
-    elif compact:
-        kwargs["include_raw_content"] = False
-    elif include_raw and include_raw.lower() not in ("false", "no", "0"):
-        kwargs["include_raw_content"] = include_raw if include_raw not in ("true", "True") else True
-
     if include_domains:
         kwargs["include_domains"] = include_domains
     if exclude_domains:
@@ -660,21 +628,15 @@ def search(
     if country:
         kwargs["country"] = country
 
-    # When history is enabled, always fetch max 20 results so the stored response is
-    # the full data trove regardless of display settings (same API credit cost).
-    display_max = kwargs.get("max_results")
-    if tavily_cli.history_enabled and not tavily_cli.no_history:
-        kwargs["max_results"] = 20
-
     logger.debug(f"Search kwargs: {kwargs}")
     t0 = time.time()
     response = tavily_cli.client.search(**kwargs)
     latency_ms = int((time.time() - t0) * 1000)
     tavily_cli.write_history("search", kwargs, response, latency_ms)
 
-    # Trim results to requested display count before rendering
-    if display_max is not None and "results" in response:
-        display_response = dict(response, results=response["results"][:display_max])
+    # Trim results client-side to the requested display count
+    if "results" in response:
+        display_response = dict(response, results=response["results"][:display_max]) if display_max else response
     else:
         display_response = response
 
