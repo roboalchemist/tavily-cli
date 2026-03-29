@@ -994,16 +994,16 @@ class TestCLIConfigIntegration:
         assert result.exit_code == 0
         assert "--no-history" in result.output
 
-    def test_history_written_by_default(self, tmp_path, mock_tavily_client):
-        """History files should be written by default (history_enabled defaults to True)."""
+    def test_history_not_written_by_default(self, tmp_path, mock_tavily_client):
+        """History requires explicit opt-in — not written when history_enabled is unset."""
         mock_tavily_client.search.return_value = {"query": "test", "results": [], "response_time": 1.0}
         runner = CliRunner()
         with patch("tavily_cli.CONFIG_FILE", "/nonexistent/config.toml"), \
              patch("tavily_cli.CONFIG_DIR", str(tmp_path)):
             result = runner.invoke(cli, ["-k", "test-key", "search", "test"])
         assert result.exit_code == 0
-        files = list((tmp_path / "history").rglob("*.json"))
-        assert len(files) == 1
+        history_dir = tmp_path / "history"
+        assert not history_dir.exists()
 
     def test_history_written_when_enabled_in_config(self, tmp_path, mock_tavily_client):
         """History files should be written when history_enabled = true in config."""
@@ -1100,13 +1100,11 @@ class TestHistoryStderr:
         assert "[history]" in result.stderr
         assert "map" in result.stderr
 
-    def test_no_stderr_when_history_explicitly_disabled(self, tmp_path, mock_tavily_client):
-        """No [history] line emitted when history_enabled = false in config."""
-        config_file = tmp_path / "config.toml"
-        config_file.write_text("history_enabled = false\n")
+    def test_no_stderr_when_history_not_enabled(self, tmp_path, mock_tavily_client):
+        """No [history] line emitted when history_enabled is not set (default: off)."""
         mock_tavily_client.search.return_value = {"query": "test", "results": [], "response_time": 1.0}
         runner = CliRunner()
-        with patch("tavily_cli.CONFIG_FILE", str(config_file)), \
+        with patch("tavily_cli.CONFIG_FILE", "/nonexistent/config.toml"), \
              patch("tavily_cli.CONFIG_DIR", str(tmp_path)):
             result = runner.invoke(cli, ["-k", "test-key", "search", "test"])
         assert result.exit_code == 0

@@ -529,7 +529,7 @@ def cli(ctx, api_key: str, output_format: Optional[str], verbose: bool, no_histo
     if output_format is None:
         output_format = config.get("default_format", "text")
 
-    history_enabled = config.get("history_enabled", True)
+    history_enabled = config.get("history_enabled", False)
 
     if not api_key:
         click.secho("Error: No API key provided.", fg="red", err=True)
