@@ -287,6 +287,119 @@ class TestSearchCompact:
         assert "include_raw_content" not in call_kwargs or call_kwargs.get("include_raw_content") is not False
 
 
+class TestSearchAnswerOnly:
+    """Tests for --answer-only flag on the search command."""
+
+    MOCK_ANSWER = "Leo Messi is an Argentine professional footballer."
+
+    def _mock_response(self, answer=None):
+        return {
+            "query": "who is Leo Messi?",
+            "answer": answer if answer is not None else self.MOCK_ANSWER,
+            "results": [
+                {
+                    "title": "Some Result",
+                    "url": "https://example.com",
+                    "content": "Some content",
+                    "score": 0.9,
+                    "raw_content": "R" * 5000,
+                }
+            ],
+            "images": [{"url": "https://example.com/img.jpg", "description": "photo"}],
+            "response_time": 1.2,
+        }
+
+    def test_answer_only_text_output(self, runner, mock_tavily_client):
+        """--answer-only prints just the answer string (stripped) in text mode."""
+        mock_tavily_client.search.return_value = self._mock_response()
+        result = runner.invoke(cli, ["-k", "test-key", "search", "who is Leo Messi?", "--answer-only"])
+        assert result.exit_code == 0
+        assert result.output.strip() == self.MOCK_ANSWER
+
+    def test_answer_only_text_no_results(self, runner, mock_tavily_client):
+        """--answer-only text output must not contain result titles or URLs."""
+        mock_tavily_client.search.return_value = self._mock_response()
+        result = runner.invoke(cli, ["-k", "test-key", "search", "who is Leo Messi?", "--answer-only"])
+        assert result.exit_code == 0
+        assert "Some Result" not in result.output
+        assert "example.com" not in result.output
+        assert "response_time" not in result.output
+
+    def test_answer_only_json_output(self, runner, mock_tavily_client):
+        """--answer-only with -f json outputs only {\"answer\": \"...\"}."""
+        mock_tavily_client.search.return_value = self._mock_response()
+        result = runner.invoke(
+            cli, ["-k", "test-key", "-f", "json", "search", "who is Leo Messi?", "--answer-only"]
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert set(data.keys()) == {"answer"}
+        assert data["answer"] == self.MOCK_ANSWER
+
+    def test_answer_only_markdown_output(self, runner, mock_tavily_client):
+        """--answer-only with -f markdown outputs ## Answer heading + answer."""
+        mock_tavily_client.search.return_value = self._mock_response()
+        result = runner.invoke(
+            cli, ["-k", "test-key", "-f", "markdown", "search", "who is Leo Messi?", "--answer-only"]
+        )
+        assert result.exit_code == 0
+        assert "## Answer" in result.output
+        assert self.MOCK_ANSWER in result.output
+        assert "Some Result" not in result.output
+
+    def test_answer_only_forces_include_answer_advanced(self, runner, mock_tavily_client):
+        """--answer-only must pass include_answer=advanced to the API."""
+        mock_tavily_client.search.return_value = self._mock_response()
+        runner.invoke(cli, ["-k", "test-key", "search", "who is Leo Messi?", "--answer-only"])
+        call_kwargs = mock_tavily_client.search.call_args[1]
+        assert call_kwargs.get("include_answer") == "advanced"
+
+    def test_answer_only_suppresses_images(self, runner, mock_tavily_client):
+        """--answer-only must pass include_images=False to avoid wasting credits."""
+        mock_tavily_client.search.return_value = self._mock_response()
+        runner.invoke(cli, ["-k", "test-key", "search", "who is Leo Messi?", "--answer-only"])
+        call_kwargs = mock_tavily_client.search.call_args[1]
+        assert call_kwargs.get("include_images") is False
+
+    def test_answer_only_suppresses_raw_content(self, runner, mock_tavily_client):
+        """--answer-only must not request raw_content to avoid wasting credits."""
+        mock_tavily_client.search.return_value = self._mock_response()
+        runner.invoke(cli, ["-k", "test-key", "search", "who is Leo Messi?", "--answer-only"])
+        call_kwargs = mock_tavily_client.search.call_args[1]
+        # include_raw_content should either be absent or False (never truthy)
+        assert not call_kwargs.get("include_raw_content")
+
+    def test_answer_only_exits_nonzero_when_no_answer(self, runner, mock_tavily_client):
+        """--answer-only must exit non-zero when API returns no answer."""
+        mock_tavily_client.search.return_value = self._mock_response(answer="")
+        result = runner.invoke(cli, ["-k", "test-key", "search", "who is Leo Messi?", "--answer-only"])
+        assert result.exit_code != 0
+
+    def test_answer_only_error_message_to_stderr_when_no_answer(self, runner, mock_tavily_client):
+        """--answer-only must emit a clear error message when no answer is returned."""
+        mock_tavily_client.search.return_value = self._mock_response(answer="")
+        result = runner.invoke(cli, ["-k", "test-key", "search", "who is Leo Messi?", "--answer-only"])
+        # Error message is in combined output (click.secho err=True goes to output in test runner)
+        assert "No answer" in result.output
+
+    def test_answer_only_appears_in_search_help(self, runner):
+        """--answer-only should appear in search command help."""
+        result = runner.invoke(cli, ["search", "--help"])
+        assert result.exit_code == 0
+        assert "--answer-only" in result.output
+
+    def test_answer_only_text_strips_whitespace(self, runner, mock_tavily_client):
+        """--answer-only text output must strip trailing whitespace for clean piping."""
+        mock_tavily_client.search.return_value = self._mock_response(
+            answer="  Leo Messi is great.  \n\n"
+        )
+        result = runner.invoke(cli, ["-k", "test-key", "search", "who is Leo Messi?", "--answer-only"])
+        assert result.exit_code == 0
+        # output ends with a single newline from click.echo, answer itself is stripped
+        assert result.output == "Leo Messi is great.\n"
+
+
+
 class TestExtract:
     """Test extract command."""
 
