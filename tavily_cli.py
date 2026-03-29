@@ -281,6 +281,22 @@ class TavilyCLI:
             else:
                 click.secho(f"\nResponse time: {response['response_time']:.2f}s", fg="bright_black")
 
+    def display_urls_only(self, response: dict) -> None:
+        """Display only the URLs from search results.
+
+        JSON: ``{"urls": ["https://...", ...]}``
+        Text: one URL per line
+        Markdown: bulleted list of URLs
+        """
+        urls = [r["url"] for r in response.get("results", []) if r.get("url")]
+
+        if self.output_format == "json":
+            click.echo(json.dumps({"urls": urls}))
+        elif self.output_format == "markdown":
+            click.echo("\n".join(f"- {url}" for url in urls))
+        else:
+            click.echo("\n".join(urls))
+
     def display_extract_results(self, response: dict, max_content: Optional[int] = None) -> None:
         """Display extract results in a readable format."""
         if self.output_format == "json":
@@ -518,6 +534,7 @@ def cli(ctx, api_key: str, output_format: Optional[str], verbose: bool, no_histo
 @click.option("--include-domains", callback=parse_list, help="Comma-separated domains to include")
 @click.option("--exclude-domains", callback=parse_list, help="Comma-separated domains to exclude")
 @click.option("--country", help="Boost results from country")
+@click.option("--urls-only", "urls_only", is_flag=True, default=False, help="Return only URLs (one per line). Disables raw content, images, and answer to save credits.")
 @pass_cli
 def search(
     tavily_cli: TavilyCLI,
@@ -536,6 +553,7 @@ def search(
     include_domains: Optional[list],
     exclude_domains: Optional[list],
     country: Optional[str],
+    urls_only: bool,
 ):
     """Execute a web search query.
 
@@ -544,6 +562,7 @@ def search(
     Example: tavily search "python frameworks" -m  # minimal output
     Example: tavily search "python frameworks" --compact  # agent-friendly JSON
     Example: tavily search "python frameworks" --top 3  # compact with 3 results
+    Example: tavily search "python frameworks" --urls-only  # URLs only, one per line
     """
     # --top N implies --compact
     if top_n is not None:
@@ -560,6 +579,12 @@ def search(
     if answer_only:
         include_images = False
         include_raw = None  # will not set include_raw_content below
+
+    # --urls-only: suppress content, images, and answer — just URLs
+    if urls_only:
+        include_images = False
+        include_raw = None  # will be explicitly disabled below
+        advanced_answer = False
 
     # Apply defaults based on compact flag (compact takes priority over minimal for raw/images)
     if answer_only:
@@ -589,9 +614,13 @@ def search(
         kwargs["time_range"] = time_range
     kwargs["include_answer"] = include_answer
 
+    # urls-only mode: disable raw content, images, and answer at the API level
+    if urls_only:
+        kwargs["include_raw_content"] = False
+        kwargs["include_answer"] = False
     # Compact mode explicitly disables raw_content at the API level to avoid
     # fetching data we'll discard, keeping responses small and API cost low.
-    if compact:
+    elif compact:
         kwargs["include_raw_content"] = False
     elif include_raw and include_raw.lower() not in ("false", "no", "0"):
         kwargs["include_raw_content"] = include_raw if include_raw not in ("true", "True") else True
@@ -608,7 +637,10 @@ def search(
     response = tavily_cli.client.search(**kwargs)
     latency_ms = int((time.time() - t0) * 1000)
     tavily_cli.write_history("search", kwargs, response, latency_ms)
-    tavily_cli.display_search_results(response, compact=compact, answer_only=answer_only)
+    if urls_only:
+        tavily_cli.display_urls_only(response)
+    else:
+        tavily_cli.display_search_results(response, compact=compact, answer_only=answer_only)
 
 
 @cli.command()

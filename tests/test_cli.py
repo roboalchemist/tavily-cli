@@ -399,6 +399,135 @@ class TestSearchAnswerOnly:
         assert result.output == "Leo Messi is great.\n"
 
 
+class TestSearchUrlsOnly:
+    """Tests for --urls-only flag on the search command."""
+
+    MOCK_RESULTS = [
+        {
+            "title": f"Result {i}",
+            "url": f"https://example.com/{i}",
+            "content": "Some content here",
+            "score": 0.9,
+        }
+        for i in range(1, 4)
+    ]
+
+    def _mock_response(self):
+        return {
+            "query": "test query",
+            "answer": "Some answer",
+            "results": self.MOCK_RESULTS,
+            "response_time": 1.0,
+        }
+
+    def test_urls_only_text_output(self, runner, mock_tavily_client):
+        """--urls-only with text format prints one URL per line, nothing else."""
+        mock_tavily_client.search.return_value = self._mock_response()
+        result = runner.invoke(cli, ["-k", "test-key", "search", "test query", "--urls-only"])
+        assert result.exit_code == 0
+        lines = result.output.strip().splitlines()
+        assert lines == [
+            "https://example.com/1",
+            "https://example.com/2",
+            "https://example.com/3",
+        ]
+        # Must not contain titles, scores, or answer text
+        assert "Result" not in result.output
+        assert "answer" not in result.output.lower()
+
+    def test_urls_only_json_output(self, runner, mock_tavily_client):
+        """--urls-only with -f json emits {\"urls\": [...]} only."""
+        mock_tavily_client.search.return_value = self._mock_response()
+        result = runner.invoke(
+            cli, ["-k", "test-key", "-f", "json", "search", "test query", "--urls-only"]
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert set(data.keys()) == {"urls"}
+        assert data["urls"] == [
+            "https://example.com/1",
+            "https://example.com/2",
+            "https://example.com/3",
+        ]
+
+    def test_urls_only_markdown_output(self, runner, mock_tavily_client):
+        """--urls-only with -f markdown emits bulleted list."""
+        mock_tavily_client.search.return_value = self._mock_response()
+        result = runner.invoke(
+            cli, ["-k", "test-key", "-f", "markdown", "search", "test query", "--urls-only"]
+        )
+        assert result.exit_code == 0
+        lines = result.output.strip().splitlines()
+        assert lines == [
+            "- https://example.com/1",
+            "- https://example.com/2",
+            "- https://example.com/3",
+        ]
+
+    def test_urls_only_disables_raw_content_in_api_call(self, runner, mock_tavily_client):
+        """--urls-only must pass include_raw_content=False to the API."""
+        mock_tavily_client.search.return_value = self._mock_response()
+        runner.invoke(cli, ["-k", "test-key", "search", "test query", "--urls-only"])
+        call_kwargs = mock_tavily_client.search.call_args[1]
+        assert call_kwargs.get("include_raw_content") is False
+
+    def test_urls_only_disables_images_in_api_call(self, runner, mock_tavily_client):
+        """--urls-only must pass include_images=False to the API."""
+        mock_tavily_client.search.return_value = self._mock_response()
+        runner.invoke(cli, ["-k", "test-key", "search", "test query", "--urls-only"])
+        call_kwargs = mock_tavily_client.search.call_args[1]
+        assert call_kwargs.get("include_images") is False
+
+    def test_urls_only_disables_answer_in_api_call(self, runner, mock_tavily_client):
+        """--urls-only must pass include_answer=False to the API."""
+        mock_tavily_client.search.return_value = self._mock_response()
+        runner.invoke(cli, ["-k", "test-key", "search", "test query", "--urls-only"])
+        call_kwargs = mock_tavily_client.search.call_args[1]
+        assert call_kwargs.get("include_answer") is False
+
+    def test_urls_only_combines_with_depth(self, runner, mock_tavily_client):
+        """--urls-only combines correctly with -d advanced."""
+        mock_tavily_client.search.return_value = self._mock_response()
+        runner.invoke(
+            cli, ["-k", "test-key", "search", "test query", "--urls-only", "-d", "advanced"]
+        )
+        call_kwargs = mock_tavily_client.search.call_args[1]
+        assert call_kwargs["search_depth"] == "advanced"
+        assert call_kwargs.get("include_raw_content") is False
+
+    def test_urls_only_combines_with_max_results(self, runner, mock_tavily_client):
+        """--urls-only combines correctly with -n."""
+        mock_tavily_client.search.return_value = self._mock_response()
+        runner.invoke(
+            cli, ["-k", "test-key", "search", "test query", "--urls-only", "-n", "3"]
+        )
+        call_kwargs = mock_tavily_client.search.call_args[1]
+        assert call_kwargs["max_results"] == 3
+
+    def test_urls_only_appears_in_search_help(self, runner):
+        """--urls-only should appear in search command help."""
+        result = runner.invoke(cli, ["search", "--help"])
+        assert result.exit_code == 0
+        assert "--urls-only" in result.output
+
+    def test_urls_only_empty_results(self, runner, mock_tavily_client):
+        """--urls-only with no results emits empty output."""
+        mock_tavily_client.search.return_value = {"query": "test", "results": [], "response_time": 0.5}
+        result = runner.invoke(cli, ["-k", "test-key", "search", "test query", "--urls-only"])
+        assert result.exit_code == 0
+        # text: empty; json: {"urls": []}; markdown: empty
+        assert result.output.strip() == ""
+
+    def test_urls_only_empty_results_json(self, runner, mock_tavily_client):
+        """--urls-only -f json with no results emits {\"urls\": []}."""
+        mock_tavily_client.search.return_value = {"query": "test", "results": [], "response_time": 0.5}
+        result = runner.invoke(
+            cli, ["-k", "test-key", "-f", "json", "search", "test query", "--urls-only"]
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data == {"urls": []}
+
 
 class TestExtract:
     """Test extract command."""
