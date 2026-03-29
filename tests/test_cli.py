@@ -157,6 +157,248 @@ class TestSearch:
         assert output["query"] == "test"
 
 
+class TestSearchCompact:
+    """Tests for --compact and --top N flags on the search command."""
+
+    MOCK_RESULTS = [
+        {
+            "title": f"Result {i}",
+            "url": f"https://example.com/{i}",
+            "content": "X" * 500,  # 500-char content to verify truncation to 200
+            "score": 0.9 - i * 0.05,
+            "raw_content": "R" * 10000,  # large raw_content that should NOT be fetched
+        }
+        for i in range(1, 8)
+    ]
+
+    def _mock_response(self, n=5):
+        return {
+            "query": "test query",
+            "answer": "This is the answer.",
+            "results": self.MOCK_RESULTS[:n],
+            "response_time": 1.0,
+        }
+
+    def test_compact_flag_sets_include_raw_content_false(self, runner, mock_tavily_client):
+        """--compact must pass include_raw_content=False to the API."""
+        mock_tavily_client.search.return_value = self._mock_response()
+        result = runner.invoke(cli, ["-k", "test-key", "-f", "json", "search", "test query", "--compact"])
+        assert result.exit_code == 0
+        call_kwargs = mock_tavily_client.search.call_args[1]
+        assert call_kwargs.get("include_raw_content") is False
+
+    def test_compact_flag_sets_include_images_false(self, runner, mock_tavily_client):
+        """--compact must disable images in the API request."""
+        mock_tavily_client.search.return_value = self._mock_response()
+        runner.invoke(cli, ["-k", "test-key", "-f", "json", "search", "test query", "--compact"])
+        call_kwargs = mock_tavily_client.search.call_args[1]
+        assert call_kwargs.get("include_images") is False
+
+    def test_compact_default_top_5(self, runner, mock_tavily_client):
+        """--compact without --top defaults to 5 results."""
+        mock_tavily_client.search.return_value = self._mock_response()
+        runner.invoke(cli, ["-k", "test-key", "-f", "json", "search", "test query", "--compact"])
+        call_kwargs = mock_tavily_client.search.call_args[1]
+        assert call_kwargs.get("max_results") == 5
+
+    def test_top_n_sets_max_results(self, runner, mock_tavily_client):
+        """--top 3 must pass max_results=3 to the API."""
+        mock_tavily_client.search.return_value = self._mock_response(n=3)
+        runner.invoke(cli, ["-k", "test-key", "-f", "json", "search", "test query", "--top", "3"])
+        call_kwargs = mock_tavily_client.search.call_args[1]
+        assert call_kwargs.get("max_results") == 3
+
+    def test_top_n_implies_compact(self, runner, mock_tavily_client):
+        """--top N without explicit --compact should still set include_raw_content=False."""
+        mock_tavily_client.search.return_value = self._mock_response(n=3)
+        runner.invoke(cli, ["-k", "test-key", "-f", "json", "search", "test query", "--top", "3"])
+        call_kwargs = mock_tavily_client.search.call_args[1]
+        assert call_kwargs.get("include_raw_content") is False
+
+    def test_compact_json_output_shape(self, runner, mock_tavily_client):
+        """--compact with -f json must emit {answer, results:[{title,url,content}]} only."""
+        mock_tavily_client.search.return_value = self._mock_response()
+        result = runner.invoke(cli, ["-k", "test-key", "-f", "json", "search", "test query", "--compact"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert set(data.keys()) == {"answer", "results"}
+        assert data["answer"] == "This is the answer."
+        assert len(data["results"]) == 5
+        for r in data["results"]:
+            assert set(r.keys()) == {"title", "url", "content"}
+
+    def test_compact_json_content_truncated_to_200(self, runner, mock_tavily_client):
+        """Content field in compact JSON output must be at most 200 chars."""
+        mock_tavily_client.search.return_value = self._mock_response()
+        result = runner.invoke(cli, ["-k", "test-key", "-f", "json", "search", "test query", "--compact"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        for r in data["results"]:
+            assert len(r["content"]) <= 200
+
+    def test_compact_json_no_raw_content_in_output(self, runner, mock_tavily_client):
+        """Compact JSON output must not contain raw_content key in results."""
+        mock_tavily_client.search.return_value = self._mock_response()
+        result = runner.invoke(cli, ["-k", "test-key", "-f", "json", "search", "test query", "--compact"])
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        for r in data["results"]:
+            assert "raw_content" not in r
+            assert "score" not in r
+
+    def test_compact_output_size_under_10kb(self, runner, mock_tavily_client):
+        """Compact output for 5 results must be under 10KB."""
+        mock_tavily_client.search.return_value = self._mock_response()
+        result = runner.invoke(cli, ["-k", "test-key", "-f", "json", "search", "test query", "--compact"])
+        assert result.exit_code == 0
+        assert len(result.output.encode("utf-8")) < 10 * 1024
+
+    def test_top_3_compact_json_has_3_results(self, runner, mock_tavily_client):
+        """--top 3 with -f json must return exactly 3 results in compact shape."""
+        mock_tavily_client.search.return_value = self._mock_response(n=3)
+        result = runner.invoke(
+            cli, ["-k", "test-key", "-f", "json", "search", "test query", "--compact", "--top", "3"]
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert len(data["results"]) == 3
+
+    def test_compact_appears_in_search_help(self, runner):
+        """--compact should appear in search command help."""
+        result = runner.invoke(cli, ["search", "--help"])
+        assert result.exit_code == 0
+        assert "--compact" in result.output
+
+    def test_top_appears_in_search_help(self, runner):
+        """--top should appear in search command help."""
+        result = runner.invoke(cli, ["search", "--help"])
+        assert result.exit_code == 0
+        assert "--top" in result.output
+
+    def test_minimal_flag_unchanged_with_compact(self, runner, mock_tavily_client):
+        """Existing --minimal flag behavior must still work (unchanged)."""
+        mock_tavily_client.search.return_value = self._mock_response()
+        result = runner.invoke(cli, ["-k", "test-key", "search", "test query", "-m"])
+        assert result.exit_code == 0
+        call_kwargs = mock_tavily_client.search.call_args[1]
+        # Minimal sets max_results=5 and include_images=False, but does NOT set include_raw_content=False
+        assert call_kwargs.get("max_results") == 5
+        assert call_kwargs.get("include_images") is False
+        assert "include_raw_content" not in call_kwargs or call_kwargs.get("include_raw_content") is not False
+
+
+class TestSearchAnswerOnly:
+    """Tests for --answer-only flag on the search command."""
+
+    MOCK_ANSWER = "Leo Messi is an Argentine professional footballer."
+
+    def _mock_response(self, answer=None):
+        return {
+            "query": "who is Leo Messi?",
+            "answer": answer if answer is not None else self.MOCK_ANSWER,
+            "results": [
+                {
+                    "title": "Some Result",
+                    "url": "https://example.com",
+                    "content": "Some content",
+                    "score": 0.9,
+                    "raw_content": "R" * 5000,
+                }
+            ],
+            "images": [{"url": "https://example.com/img.jpg", "description": "photo"}],
+            "response_time": 1.2,
+        }
+
+    def test_answer_only_text_output(self, runner, mock_tavily_client):
+        """--answer-only prints just the answer string (stripped) in text mode."""
+        mock_tavily_client.search.return_value = self._mock_response()
+        result = runner.invoke(cli, ["-k", "test-key", "search", "who is Leo Messi?", "--answer-only"])
+        assert result.exit_code == 0
+        assert result.output.strip() == self.MOCK_ANSWER
+
+    def test_answer_only_text_no_results(self, runner, mock_tavily_client):
+        """--answer-only text output must not contain result titles or URLs."""
+        mock_tavily_client.search.return_value = self._mock_response()
+        result = runner.invoke(cli, ["-k", "test-key", "search", "who is Leo Messi?", "--answer-only"])
+        assert result.exit_code == 0
+        assert "Some Result" not in result.output
+        assert "example.com" not in result.output
+        assert "response_time" not in result.output
+
+    def test_answer_only_json_output(self, runner, mock_tavily_client):
+        """--answer-only with -f json outputs only {\"answer\": \"...\"}."""
+        mock_tavily_client.search.return_value = self._mock_response()
+        result = runner.invoke(
+            cli, ["-k", "test-key", "-f", "json", "search", "who is Leo Messi?", "--answer-only"]
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert set(data.keys()) == {"answer"}
+        assert data["answer"] == self.MOCK_ANSWER
+
+    def test_answer_only_markdown_output(self, runner, mock_tavily_client):
+        """--answer-only with -f markdown outputs ## Answer heading + answer."""
+        mock_tavily_client.search.return_value = self._mock_response()
+        result = runner.invoke(
+            cli, ["-k", "test-key", "-f", "markdown", "search", "who is Leo Messi?", "--answer-only"]
+        )
+        assert result.exit_code == 0
+        assert "## Answer" in result.output
+        assert self.MOCK_ANSWER in result.output
+        assert "Some Result" not in result.output
+
+    def test_answer_only_forces_include_answer_advanced(self, runner, mock_tavily_client):
+        """--answer-only must pass include_answer=advanced to the API."""
+        mock_tavily_client.search.return_value = self._mock_response()
+        runner.invoke(cli, ["-k", "test-key", "search", "who is Leo Messi?", "--answer-only"])
+        call_kwargs = mock_tavily_client.search.call_args[1]
+        assert call_kwargs.get("include_answer") == "advanced"
+
+    def test_answer_only_suppresses_images(self, runner, mock_tavily_client):
+        """--answer-only must pass include_images=False to avoid wasting credits."""
+        mock_tavily_client.search.return_value = self._mock_response()
+        runner.invoke(cli, ["-k", "test-key", "search", "who is Leo Messi?", "--answer-only"])
+        call_kwargs = mock_tavily_client.search.call_args[1]
+        assert call_kwargs.get("include_images") is False
+
+    def test_answer_only_suppresses_raw_content(self, runner, mock_tavily_client):
+        """--answer-only must not request raw_content to avoid wasting credits."""
+        mock_tavily_client.search.return_value = self._mock_response()
+        runner.invoke(cli, ["-k", "test-key", "search", "who is Leo Messi?", "--answer-only"])
+        call_kwargs = mock_tavily_client.search.call_args[1]
+        # include_raw_content should either be absent or False (never truthy)
+        assert not call_kwargs.get("include_raw_content")
+
+    def test_answer_only_exits_nonzero_when_no_answer(self, runner, mock_tavily_client):
+        """--answer-only must exit non-zero when API returns no answer."""
+        mock_tavily_client.search.return_value = self._mock_response(answer="")
+        result = runner.invoke(cli, ["-k", "test-key", "search", "who is Leo Messi?", "--answer-only"])
+        assert result.exit_code != 0
+
+    def test_answer_only_error_message_to_stderr_when_no_answer(self, runner, mock_tavily_client):
+        """--answer-only must emit a clear error message when no answer is returned."""
+        mock_tavily_client.search.return_value = self._mock_response(answer="")
+        result = runner.invoke(cli, ["-k", "test-key", "search", "who is Leo Messi?", "--answer-only"])
+        # Error message is in combined output (click.secho err=True goes to output in test runner)
+        assert "No answer" in result.output
+
+    def test_answer_only_appears_in_search_help(self, runner):
+        """--answer-only should appear in search command help."""
+        result = runner.invoke(cli, ["search", "--help"])
+        assert result.exit_code == 0
+        assert "--answer-only" in result.output
+
+    def test_answer_only_text_strips_whitespace(self, runner, mock_tavily_client):
+        """--answer-only text output must strip trailing whitespace for clean piping."""
+        mock_tavily_client.search.return_value = self._mock_response(
+            answer="  Leo Messi is great.  \n\n"
+        )
+        result = runner.invoke(cli, ["-k", "test-key", "search", "who is Leo Messi?", "--answer-only"])
+        assert result.exit_code == 0
+        # output ends with a single newline from click.echo, answer itself is stripped
+        assert result.output == "Leo Messi is great.\n"
+
+
 class TestExtract:
     """Test extract command."""
 

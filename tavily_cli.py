@@ -172,10 +172,49 @@ class TavilyCLI:
             else:
                 click.echo(f"{prefix}{click.style(f'{key}:', fg='yellow')} {value}")
 
-    def display_search_results(self, response: dict) -> None:
-        """Display search results in a readable format."""
+    def display_search_results(
+        self, response: dict, compact: bool = False, answer_only: bool = False
+    ) -> None:
+        """Display search results in a readable format.
+
+        When *compact* is True and output format is json, emit a stripped shape:
+        ``{"answer": "...", "results": [{"title", "url", "content": first 200 chars}]}``
+        instead of the full Tavily response dict.  This keeps output under ~10 KB for
+        5 results and is safe for agent consumption without further filtering.
+
+        When *answer_only* is True, emit only the AI-synthesized answer string and return.
+        In json format: ``{"answer": "..."}``.  In text/markdown format: the raw answer
+        string (stripped), suitable for piping.  Exits non-zero if no answer is present.
+        """
+        if answer_only:
+            answer = response.get("answer", "")
+            if not answer:
+                click.secho("Error: No answer returned by the API.", fg="red", err=True)
+                sys.exit(1)
+            if self.output_format == "json":
+                click.echo(json.dumps({"answer": answer}))
+            elif self.output_format == "markdown":
+                click.echo(f"## Answer\n\n{answer.strip()}")
+            else:
+                click.echo(answer.strip())
+            return
+
         if self.output_format == "json":
-            click.echo(json.dumps(response, indent=2))
+            if compact:
+                stripped = {
+                    "answer": response.get("answer", ""),
+                    "results": [
+                        {
+                            "title": r.get("title", ""),
+                            "url": r.get("url", ""),
+                            "content": r.get("content", "")[:200],
+                        }
+                        for r in response.get("results", [])
+                    ],
+                }
+                click.echo(json.dumps(stripped))
+            else:
+                click.echo(json.dumps(response, indent=2))
             return
 
         is_md = self.output_format == "markdown"
@@ -465,6 +504,9 @@ def cli(ctx, api_key: str, output_format: Optional[str], verbose: bool, no_histo
 @cli.command()
 @click.argument("query")
 @click.option("-m", "--minimal", is_flag=True, help="Minimal output for small context windows (5 results, no raw content, no images)")
+@click.option("--answer-only", is_flag=True, default=False, help="Return only the AI-synthesized answer string. Forces include_answer=advanced, suppresses results/images/raw_content.")
+@click.option("--compact", is_flag=True, default=False, help="Agent-friendly compact JSON: answer + top N results (title/url/content snippet). Sets include_raw_content=False server-side. Implies --top 5.")
+@click.option("--top", "top_n", type=click.IntRange(min=1), default=None, help="Return top N results (default 5 when --compact is set). Implies --compact.")
 @click.option("-d", "--depth", type=click.Choice(SEARCH_DEPTHS), default=None, help="Search depth (basic=1 credit, advanced=2 credits)")
 @click.option("-t", "--topic", type=click.Choice(SEARCH_TOPICS), default=None, help="Search topic")
 @click.option("-n", "--max-results", type=click.IntRange(min=1), default=5, help="Maximum results (default: 5).")
@@ -480,6 +522,9 @@ def search(
     tavily_cli: TavilyCLI,
     query: str,
     minimal: bool,
+    answer_only: bool,
+    compact: bool,
+    top_n: Optional[int],
     depth: Optional[str],
     topic: Optional[str],
     max_results: Optional[int],
@@ -494,17 +539,35 @@ def search(
     """Execute a web search query.
 
     Example: tavily search "who is Leo Messi?"
+    Example: tavily search "who is Leo Messi?" --answer-only  # answer string only
     Example: tavily search "python frameworks" -m  # minimal output
+    Example: tavily search "python frameworks" --compact  # agent-friendly JSON
+    Example: tavily search "python frameworks" --top 3  # compact with 3 results
     """
+    # --top N implies --compact
+    if top_n is not None:
+        compact = True
+
     # Apply config defaults then hardcoded defaults (CLI flag > config > hardcoded)
     depth = depth or tavily_cli.config.get("default_depth", "basic")
     topic = topic or tavily_cli.config.get("default_topic", "general")
 
-    # Resolve include_answer: -a flag upgrades to advanced, otherwise basic
-    include_answer = "advanced" if advanced_answer else "basic"
+    # Resolve include_answer: answer_only and -a both force advanced
+    include_answer = "advanced" if (answer_only or advanced_answer) else "basic"
 
-    # Apply defaults based on minimal flag
-    if minimal:
+    # --answer-only: suppress everything we'll discard to save credits
+    if answer_only:
+        include_images = False
+        include_raw = None  # will not set include_raw_content below
+
+    # Apply defaults based on compact flag (compact takes priority over minimal for raw/images)
+    if answer_only:
+        pass  # already handled above
+    elif compact:
+        max_results = top_n or 5
+        include_images = False
+        include_raw = None  # will be explicitly set to False below
+    elif minimal:
         max_results = max_results or tavily_cli.config.get("default_max_results") or 5
         include_images = include_images if include_images is not None else False
         include_raw = include_raw if include_raw else None  # No raw content in minimal
@@ -524,8 +587,14 @@ def search(
     if time_range:
         kwargs["time_range"] = time_range
     kwargs["include_answer"] = include_answer
-    if include_raw and include_raw.lower() not in ("false", "no", "0"):
+
+    # Compact mode explicitly disables raw_content at the API level to avoid
+    # fetching data we'll discard, keeping responses small and API cost low.
+    if compact:
+        kwargs["include_raw_content"] = False
+    elif include_raw and include_raw.lower() not in ("false", "no", "0"):
         kwargs["include_raw_content"] = include_raw if include_raw not in ("true", "True") else True
+
     if include_domains:
         kwargs["include_domains"] = include_domains
     if exclude_domains:
@@ -538,7 +607,7 @@ def search(
     response = tavily_cli.client.search(**kwargs)
     latency_ms = int((time.time() - t0) * 1000)
     tavily_cli.write_history("search", kwargs, response, latency_ms)
-    tavily_cli.display_search_results(response)
+    tavily_cli.display_search_results(response, compact=compact, answer_only=answer_only)
 
 
 @cli.command()
