@@ -454,7 +454,7 @@ def cli(ctx, api_key: str, output_format: Optional[str], verbose: bool, no_histo
 @click.option("-t", "--topic", type=click.Choice(SEARCH_TOPICS), default=None, help="Search topic")
 @click.option("-n", "--max-results", type=click.IntRange(min=1), default=None, help="Maximum results (default: API default).")
 @click.option("--time-range", type=click.Choice(TIME_RANGES), help="Filter by time range")
-@click.option("-a", "--advanced-answer", "advanced_answer", is_flag=True, default=False, help="Use advanced LLM answer (default: basic). -a upgrades to advanced. Free with search.")
+@click.option("-a", "--advanced-answer", "advanced_answer", is_flag=True, default=False, help="Use advanced AI answer instead of basic (basic included by default, both free with search).")
 @click.option("-r", "--include-raw", is_flag=False, flag_value="markdown", default="markdown", help="Raw content: markdown (default), text, or --include-raw=false to disable. Free with search.")
 @click.option("--include-images/--no-images", default=None, help="Include image results (free with search)")
 @click.option("--include-domains", callback=parse_list, help="Comma-separated domains to include")
