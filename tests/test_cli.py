@@ -1304,3 +1304,87 @@ class TestLargeOutputWarning:
         assert result.exit_code == 0
         # Should contain a number followed by KB
         assert re.search(r"\d+KB", result.stderr)
+
+
+class TestHistoryFullFetch:
+    """When history is enabled, search must fetch max_results=20 from the API
+    regardless of the display limit, so the stored response is the full data trove."""
+
+    def _make_results(self, n):
+        return [{"url": f"https://example.com/{i}", "title": f"Result {i}", "content": "x", "score": 0.9} for i in range(n)]
+
+    def test_history_enabled_fetches_20_regardless_of_display_n(self, tmp_path, mock_tavily_client):
+        """With history on and -n 3, the API must be called with max_results=20."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("history_enabled = true\n")
+        mock_tavily_client.search.return_value = {
+            "query": "test", "results": self._make_results(20), "response_time": 0.5
+        }
+        runner = CliRunner()
+        with patch("tavily_cli.CONFIG_FILE", str(config_file)), \
+             patch("tavily_cli.CONFIG_DIR", str(tmp_path)):
+            result = runner.invoke(cli, ["-k", "test-key", "-f", "json", "search", "test", "-n", "3"])
+        assert result.exit_code == 0
+        call_kwargs = mock_tavily_client.search.call_args[1]
+        assert call_kwargs["max_results"] == 20
+
+    def test_history_enabled_display_is_trimmed_to_n(self, tmp_path, mock_tavily_client):
+        """Even though 20 are fetched, only the requested -n results appear in output."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("history_enabled = true\n")
+        mock_tavily_client.search.return_value = {
+            "query": "test", "results": self._make_results(20), "response_time": 0.5
+        }
+        runner = CliRunner()
+        with patch("tavily_cli.CONFIG_FILE", str(config_file)), \
+             patch("tavily_cli.CONFIG_DIR", str(tmp_path)):
+            result = runner.invoke(cli, ["-k", "test-key", "-f", "json", "search", "test", "-n", "3"])
+        assert result.exit_code == 0
+        data = json.loads(result.stdout)
+        assert len(data["results"]) == 3
+
+    def test_history_enabled_full_20_stored_in_history_file(self, tmp_path, mock_tavily_client):
+        """History file must contain the full 20-result response, not the trimmed display."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("history_enabled = true\n")
+        mock_tavily_client.search.return_value = {
+            "query": "test", "results": self._make_results(20), "response_time": 0.5
+        }
+        runner = CliRunner()
+        with patch("tavily_cli.CONFIG_FILE", str(config_file)), \
+             patch("tavily_cli.CONFIG_DIR", str(tmp_path)):
+            result = runner.invoke(cli, ["-k", "test-key", "search", "test", "-n", "3"])
+        assert result.exit_code == 0
+        # Find the written history file
+        history_files = list(tmp_path.rglob("*.json"))
+        assert len(history_files) == 1
+        stored = json.loads(history_files[0].read_text())
+        assert len(stored["response"]["results"]) == 20
+
+    def test_history_disabled_respects_user_n(self, tmp_path, mock_tavily_client):
+        """With history off, -n 3 is passed as max_results=3 to the API (no override)."""
+        mock_tavily_client.search.return_value = {
+            "query": "test", "results": self._make_results(3), "response_time": 0.5
+        }
+        runner = CliRunner()
+        with patch("tavily_cli.CONFIG_FILE", "/nonexistent/config.toml"), \
+             patch("tavily_cli.CONFIG_DIR", str(tmp_path)):
+            result = runner.invoke(cli, ["-k", "test-key", "search", "test", "-n", "3"])
+        assert result.exit_code == 0
+        call_kwargs = mock_tavily_client.search.call_args[1]
+        assert call_kwargs["max_results"] == 3
+
+    def test_no_history_flag_overrides_full_fetch(self, tmp_path, mock_tavily_client):
+        """--no-history suppresses full-fetch override even when config has history_enabled=true."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("history_enabled = true\n")
+        mock_tavily_client.search.return_value = {
+            "query": "test", "results": self._make_results(3), "response_time": 0.5
+        }
+        runner = CliRunner()
+        with patch("tavily_cli.CONFIG_FILE", str(config_file)), \
+             patch("tavily_cli.CONFIG_DIR", str(tmp_path)):
+            result = runner.invoke(cli, ["-k", "test-key", "--no-history", "search", "test", "-n", "3"])
+        assert result.exit_code == 0
+        call_kwargs = mock_tavily_client.search.call_args[1]
+        assert call_kwargs["max_results"] == 3

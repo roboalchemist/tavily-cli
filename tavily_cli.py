@@ -660,15 +660,28 @@ def search(
     if country:
         kwargs["country"] = country
 
+    # When history is enabled, always fetch max 20 results so the stored response is
+    # the full data trove regardless of display settings (same API credit cost).
+    display_max = kwargs.get("max_results")
+    if tavily_cli.history_enabled and not tavily_cli.no_history:
+        kwargs["max_results"] = 20
+
     logger.debug(f"Search kwargs: {kwargs}")
     t0 = time.time()
     response = tavily_cli.client.search(**kwargs)
     latency_ms = int((time.time() - t0) * 1000)
     tavily_cli.write_history("search", kwargs, response, latency_ms)
-    if urls_only:
-        tavily_cli.display_urls_only(response)
+
+    # Trim results to requested display count before rendering
+    if display_max is not None and "results" in response:
+        display_response = dict(response, results=response["results"][:display_max])
     else:
-        tavily_cli.display_search_results(response, compact=compact, answer_only=answer_only)
+        display_response = response
+
+    if urls_only:
+        tavily_cli.display_urls_only(display_response)
+    else:
+        tavily_cli.display_search_results(display_response, compact=compact, answer_only=answer_only)
 
 
 @cli.command()
