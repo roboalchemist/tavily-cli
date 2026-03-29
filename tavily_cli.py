@@ -319,7 +319,7 @@ def cli(ctx, api_key: str, output_format: str, verbose: bool):
 @click.option("-m", "--minimal", is_flag=True, help="Minimal output for small context windows (5 results, no raw content, no images)")
 @click.option("-d", "--depth", type=click.Choice(SEARCH_DEPTHS), default="basic", help="Search depth (basic=1 credit, advanced=2 credits)")
 @click.option("-t", "--topic", type=click.Choice(SEARCH_TOPICS), default="general", help="Search topic")
-@click.option("-n", "--max-results", type=click.IntRange(1, 20), default=20, help="Maximum results (1-20). All same price.")
+@click.option("-n", "--max-results", type=click.IntRange(min=1), default=None, help="Maximum results (default: API default).")
 @click.option("--time-range", type=click.Choice(TIME_RANGES), help="Filter by time range")
 @click.option("-a", "--include-answer", is_flag=False, flag_value="advanced", default="basic", help="LLM answer: basic (default), advanced (-a), or --include-answer=false to disable. Free with search.")
 @click.option("-r", "--include-raw", is_flag=False, flag_value="markdown", default="markdown", help="Raw content: markdown (default), text, or --include-raw=false to disable. Free with search.")
@@ -354,7 +354,7 @@ def search(
         include_images = include_images if include_images is not None else False
         include_raw = include_raw if include_raw else None  # No raw content in minimal
     else:
-        max_results = max_results if max_results is not None else 20
+
         include_images = include_images if include_images is not None else True
         include_raw = include_raw if include_raw else "markdown"  # Include raw by default
 
@@ -362,9 +362,10 @@ def search(
         "query": query,
         "search_depth": depth,
         "topic": topic,
-        "max_results": max_results,
         "include_images": include_images,
     }
+    if max_results is not None:
+        kwargs["max_results"] = max_results
 
     if time_range:
         kwargs["time_range"] = time_range
