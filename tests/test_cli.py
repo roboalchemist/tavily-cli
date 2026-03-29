@@ -193,6 +193,108 @@ class TestExtract:
         assert len(call_kwargs["urls"]) == 2
 
 
+class TestExtractMaxContent:
+    """Test --max-content option on extract command."""
+
+    LONG_CONTENT = "A" * 5000
+
+    def _mock_response(self):
+        return {
+            "results": [
+                {
+                    "url": "https://example.com",
+                    "raw_content": self.LONG_CONTENT,
+                }
+            ],
+            "failed_results": [],
+            "response_time": 0.5,
+        }
+
+    def test_max_content_text_truncates(self, runner, mock_tavily_client):
+        """--max-content truncates output in text mode."""
+        mock_tavily_client.extract.return_value = self._mock_response()
+        result = runner.invoke(
+            cli,
+            ["-k", "test-key", "extract", "https://example.com", "--max-content", "100"],
+        )
+        assert result.exit_code == 0
+        assert "A" * 100 in result.output
+        assert "A" * 101 not in result.output
+        assert "[truncated at 100 chars]" in result.output
+
+    def test_max_content_text_no_truncation_marker_when_not_needed(self, runner, mock_tavily_client):
+        """No truncation marker when content is shorter than --max-content."""
+        mock_tavily_client.extract.return_value = {
+            "results": [{"url": "https://example.com", "raw_content": "short content"}],
+            "failed_results": [],
+            "response_time": 0.5,
+        }
+        result = runner.invoke(
+            cli,
+            ["-k", "test-key", "extract", "https://example.com", "--max-content", "1000"],
+        )
+        assert result.exit_code == 0
+        assert "short content" in result.output
+        assert "[truncated" not in result.output
+
+    def test_no_max_content_emits_full_content(self, runner, mock_tavily_client):
+        """Without --max-content, full content is emitted (no hardcoded 2000-char limit)."""
+        mock_tavily_client.extract.return_value = self._mock_response()
+        result = runner.invoke(
+            cli,
+            ["-k", "test-key", "extract", "https://example.com"],
+        )
+        assert result.exit_code == 0
+        # All 5000 chars should be present
+        assert "A" * 5000 in result.output
+        assert "[truncated" not in result.output
+
+    def test_max_content_markdown_truncates(self, runner, mock_tavily_client):
+        """--max-content truncates output in markdown mode."""
+        mock_tavily_client.extract.return_value = self._mock_response()
+        result = runner.invoke(
+            cli,
+            ["-k", "test-key", "-f", "markdown", "extract", "https://example.com", "--max-content", "200"],
+        )
+        assert result.exit_code == 0
+        assert "A" * 200 in result.output
+        assert "A" * 201 not in result.output
+        assert "[truncated at 200 chars]" in result.output
+
+    def test_max_content_json_truncates_raw_content(self, runner, mock_tavily_client):
+        """--max-content truncates raw_content in JSON output (no marker, just truncated string)."""
+        mock_tavily_client.extract.return_value = self._mock_response()
+        result = runner.invoke(
+            cli,
+            ["-k", "test-key", "-f", "json", "extract", "https://example.com", "--max-content", "150"],
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert len(data["results"][0]["raw_content"]) == 150
+        assert "[truncated" not in data["results"][0]["raw_content"]
+
+    def test_max_content_json_no_truncation_when_content_shorter(self, runner, mock_tavily_client):
+        """JSON mode: content shorter than limit is not modified."""
+        mock_tavily_client.extract.return_value = {
+            "results": [{"url": "https://example.com", "raw_content": "short"}],
+            "failed_results": [],
+            "response_time": 0.5,
+        }
+        result = runner.invoke(
+            cli,
+            ["-k", "test-key", "-f", "json", "extract", "https://example.com", "--max-content", "1000"],
+        )
+        assert result.exit_code == 0
+        data = json.loads(result.output)
+        assert data["results"][0]["raw_content"] == "short"
+
+    def test_max_content_appears_in_help(self, runner):
+        """--max-content should appear in extract help output."""
+        result = runner.invoke(cli, ["extract", "--help"])
+        assert result.exit_code == 0
+        assert "--max-content" in result.output
+
+
 class TestCrawl:
     """Test crawl command."""
 

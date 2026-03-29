@@ -240,9 +240,15 @@ class TavilyCLI:
             else:
                 click.secho(f"\nResponse time: {response['response_time']:.2f}s", fg="bright_black")
 
-    def display_extract_results(self, response: dict) -> None:
+    def display_extract_results(self, response: dict, max_content: Optional[int] = None) -> None:
         """Display extract results in a readable format."""
         if self.output_format == "json":
+            if max_content is not None:
+                # Deep-copy the response to avoid mutating the original, then truncate
+                response = json.loads(json.dumps(response))
+                for result in response.get("results", []):
+                    if "raw_content" in result and result["raw_content"]:
+                        result["raw_content"] = result["raw_content"][:max_content]
             click.echo(json.dumps(response, indent=2))
             return
 
@@ -258,15 +264,23 @@ class TavilyCLI:
             url = result.get("url", "")
             content = result.get("raw_content", "")
 
+            # Apply --max-content truncation (client-side display only)
+            truncated = False
+            if max_content is not None and content and len(content) > max_content:
+                content = content[:max_content]
+                truncated = True
+
             if is_md:
                 click.echo(f"## {i}. {url}\n")
-                click.echo(f"{content}\n")
-                click.echo("---\n")
+                click.echo(f"{content}")
+                if truncated:
+                    click.echo(f"\n... [truncated at {max_content} chars]")
+                click.echo("\n---\n")
             else:
                 click.secho(f"{i}. {url}\n", bold=True)
-                click.echo(content[:2000])
-                if len(content) > 2000:
-                    click.echo(f"\n... ({len(content) - 2000} more characters)")
+                click.echo(content)
+                if truncated:
+                    click.echo(f"\n... [truncated at {max_content} chars]")
                 click.echo("\n" + "-" * 60 + "\n")
 
         # Display failed results
@@ -532,6 +546,7 @@ def search(
 @click.option("--output-format", type=click.Choice(CONTENT_FORMATS), default="markdown", help="Content format")
 @click.option("--include-images", is_flag=True, help="Include images")
 @click.option("--timeout", type=click.FloatRange(1, 60), help="Timeout in seconds (1-60)")
+@click.option("--max-content", type=click.IntRange(min=1), default=None, help="Truncate raw_content to N characters per URL (client-side display only)")
 @pass_cli
 def extract(
     tavily_cli: TavilyCLI,
@@ -540,6 +555,7 @@ def extract(
     output_format: str,
     include_images: bool,
     timeout: Optional[float],
+    max_content: Optional[int],
 ):
     """Extract content from one or more URLs.
 
@@ -559,7 +575,7 @@ def extract(
     response = tavily_cli.client.extract(**kwargs)
     latency_ms = int((time.time() - t0) * 1000)
     tavily_cli.write_history("extract", kwargs, response, latency_ms)
-    tavily_cli.display_extract_results(response)
+    tavily_cli.display_extract_results(response, max_content=max_content)
 
 
 @cli.command()
