@@ -506,7 +506,7 @@ pass_cli = click.make_pass_decorator(TavilyCLI, ensure=True)
 @click.option("-f", "--format", "output_format", type=click.Choice(OUTPUT_FORMATS), default=None, help="Output format")
 @click.option("-v", "--verbose", is_flag=True, help="Enable debug output")
 @click.option("--no-history", is_flag=True, default=False, help="Skip writing history for this invocation")
-@click.version_option(version="1.2.0")
+@click.version_option(version="1.2.1")
 @click.pass_context
 def cli(ctx, api_key: str, output_format: Optional[str], verbose: bool, no_history: bool):
     """Tavily CLI - AI-powered search from the command line.
