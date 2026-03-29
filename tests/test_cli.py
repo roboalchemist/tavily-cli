@@ -1022,3 +1022,156 @@ class TestHistoryStderr:
             cli_instance.write_history("search", {"query": "hello"}, {"results": []}, 100)
         history_dir = tmp_path / "history"
         assert not history_dir.exists()
+
+
+class TestLargeOutputWarning:
+    """Tests for the _warn_if_large helper and its integration in display_* methods."""
+
+    def _make_large_search_response(self, size_bytes: int = 200_000) -> dict:
+        """Build a mock search response whose JSON serialization exceeds size_bytes."""
+        padding = "x" * size_bytes
+        return {
+            "query": "large query",
+            "results": [
+                {
+                    "title": "Big Result",
+                    "url": "https://example.com",
+                    "content": "content",
+                    "score": 0.9,
+                    "raw_content": padding,
+                }
+            ],
+            "response_time": 1.0,
+        }
+
+    # ------------------------------------------------------------------ #
+    # Unit tests for _warn_if_large directly                               #
+    # ------------------------------------------------------------------ #
+
+    def test_warn_if_large_fires_when_over_threshold(self, runner):
+        """_warn_if_large emits a warning for a serialized string over the threshold."""
+        from tavily_cli import CONTEXT_SAFE_OUTPUT_BYTES
+        import click as _click
+
+        cli_instance = TavilyCLI(api_key="test", output_format="json")
+        large_str = "x" * (CONTEXT_SAFE_OUTPUT_BYTES + 1)
+
+        @_click.command()
+        def _probe():
+            cli_instance._warn_if_large(large_str)
+
+        result = runner.invoke(_probe)
+        assert "Warning" in result.output or "Warning" in result.stderr
+
+    def test_warn_if_large_silent_when_under_threshold(self, runner):
+        """_warn_if_large does not emit anything for a small payload."""
+        from tavily_cli import CONTEXT_SAFE_OUTPUT_BYTES
+        import click as _click
+
+        cli_instance = TavilyCLI(api_key="test", output_format="json")
+        small_str = "x" * (CONTEXT_SAFE_OUTPUT_BYTES - 1)
+
+        @_click.command()
+        def _probe():
+            cli_instance._warn_if_large(small_str)
+
+        result = runner.invoke(_probe)
+        assert "Warning" not in result.output
+        assert "Warning" not in result.stderr
+
+    # ------------------------------------------------------------------ #
+    # Integration: warning on stderr for each display_* command           #
+    # ------------------------------------------------------------------ #
+
+    def test_search_json_large_warns_to_stderr(self, runner, mock_tavily_client):
+        """JSON search output > 150KB emits warning to stderr, not stdout."""
+        mock_tavily_client.search.return_value = self._make_large_search_response(200_000)
+        result = runner.invoke(cli, ["-k", "test-key", "-f", "json", "search", "big query"])
+        assert result.exit_code == 0
+        # Warning goes to stderr
+        assert "Warning" in result.stderr
+        assert "KB" in result.stderr
+        # stdout is still valid JSON
+        data = json.loads(result.stdout)
+        assert "query" in data
+
+    def test_search_json_small_no_warning(self, runner, mock_tavily_client):
+        """JSON search output under 150KB produces no warning."""
+        mock_tavily_client.search.return_value = {
+            "query": "small",
+            "results": [],
+            "response_time": 0.5,
+        }
+        result = runner.invoke(cli, ["-k", "test-key", "-f", "json", "search", "small"])
+        assert result.exit_code == 0
+        assert "Warning" not in result.stderr
+
+    def test_search_json_warning_suggests_flags(self, runner, mock_tavily_client):
+        """The stderr warning must mention at least two mitigation flags."""
+        mock_tavily_client.search.return_value = self._make_large_search_response(200_000)
+        result = runner.invoke(cli, ["-k", "test-key", "-f", "json", "search", "big query"])
+        assert result.exit_code == 0
+        warning = result.stderr
+        # Must mention at least two of the three suggested flags
+        flags_mentioned = sum(1 for f in ["--compact", "-n 5", "--include-raw=false"] if f in warning)
+        assert flags_mentioned >= 2
+
+    def test_extract_json_large_warns_to_stderr(self, runner, mock_tavily_client):
+        """JSON extract output > 150KB emits warning to stderr."""
+        padding = "x" * 200_000
+        mock_tavily_client.extract.return_value = {
+            "results": [{"url": "https://example.com", "raw_content": padding}],
+            "failed_results": [],
+            "response_time": 1.0,
+        }
+        result = runner.invoke(cli, ["-k", "test-key", "-f", "json", "extract", "https://example.com"])
+        assert result.exit_code == 0
+        assert "Warning" in result.stderr
+        data = json.loads(result.stdout)
+        assert "results" in data
+
+    def test_crawl_json_large_warns_to_stderr(self, runner, mock_tavily_client):
+        """JSON crawl output > 150KB emits warning to stderr."""
+        padding = "x" * 200_000
+        mock_tavily_client.crawl.return_value = {
+            "base_url": "https://example.com",
+            "results": [{"url": "https://example.com/page", "raw_content": padding}],
+            "response_time": 2.0,
+        }
+        result = runner.invoke(cli, ["-k", "test-key", "-f", "json", "crawl", "https://example.com"])
+        assert result.exit_code == 0
+        assert "Warning" in result.stderr
+        data = json.loads(result.stdout)
+        assert "base_url" in data
+
+    def test_map_json_large_warns_to_stderr(self, runner, mock_tavily_client):
+        """JSON map output > 150KB emits warning to stderr."""
+        # map returns a list of URLs; build enough to exceed threshold
+        many_urls = [f"https://example.com/page-{'x' * 100}/{i}" for i in range(1500)]
+        mock_tavily_client.map.return_value = {
+            "base_url": "https://example.com",
+            "results": many_urls,
+            "response_time": 1.5,
+        }
+        result = runner.invoke(cli, ["-k", "test-key", "-f", "json", "map", "https://example.com"])
+        assert result.exit_code == 0
+        assert "Warning" in result.stderr
+        data = json.loads(result.stdout)
+        assert "base_url" in data
+
+    def test_warning_not_emitted_for_text_format(self, runner, mock_tavily_client):
+        """Warning is NOT emitted for large text-format output (only json path)."""
+        mock_tavily_client.search.return_value = self._make_large_search_response(200_000)
+        result = runner.invoke(cli, ["-k", "test-key", "search", "big query"])
+        # No format flag means text; warning should be absent
+        assert "Warning" not in result.stderr
+
+    def test_warning_contains_size_in_kb(self, runner, mock_tavily_client):
+        """The stderr warning must report the actual output size in KB."""
+        import re
+
+        mock_tavily_client.search.return_value = self._make_large_search_response(200_000)
+        result = runner.invoke(cli, ["-k", "test-key", "-f", "json", "search", "big query"])
+        assert result.exit_code == 0
+        # Should contain a number followed by KB
+        assert re.search(r"\d+KB", result.stderr)
