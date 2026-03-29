@@ -119,9 +119,9 @@ class TestSearch:
         assert "Test Result" in result.output
         mock_tavily_client.search.assert_called_once()
 
-        # Verify defaults: no explicit max_results (uses API default), include_answer="basic"
+        # Verify defaults: max_results=5 (new default), include_answer="basic"
         call_kwargs = mock_tavily_client.search.call_args[1]
-        assert "max_results" not in call_kwargs
+        assert call_kwargs["max_results"] == 5
         assert call_kwargs["include_answer"] == "basic"
 
     def test_search_with_options(self, runner, mock_tavily_client):

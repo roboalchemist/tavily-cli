@@ -452,7 +452,7 @@ def cli(ctx, api_key: str, output_format: Optional[str], verbose: bool, no_histo
 @click.option("-m", "--minimal", is_flag=True, help="Minimal output for small context windows (5 results, no raw content, no images)")
 @click.option("-d", "--depth", type=click.Choice(SEARCH_DEPTHS), default=None, help="Search depth (basic=1 credit, advanced=2 credits)")
 @click.option("-t", "--topic", type=click.Choice(SEARCH_TOPICS), default=None, help="Search topic")
-@click.option("-n", "--max-results", type=click.IntRange(min=1), default=None, help="Maximum results (default: API default).")
+@click.option("-n", "--max-results", type=click.IntRange(min=1), default=5, help="Maximum results (default: 5).")
 @click.option("--time-range", type=click.Choice(TIME_RANGES), help="Filter by time range")
 @click.option("-a", "--advanced-answer", "advanced_answer", is_flag=True, default=False, help="Use advanced LLM answer (default: basic). -a upgrades to advanced. Free with search.")
 @click.option("-r", "--include-raw", is_flag=False, flag_value="markdown", default="markdown", help="Raw content: markdown (default), text, or --include-raw=false to disable. Free with search.")
