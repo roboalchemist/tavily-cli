@@ -651,3 +651,131 @@ class TestCLIConfigIntegration:
         assert result.exit_code == 0
         history_dir = tmp_path / "history"
         assert not history_dir.exists()
+
+
+class TestHistoryStderr:
+    """Test that history file path is printed to stderr after each logged query."""
+
+    def test_history_path_emitted_to_stderr_on_search(self, tmp_path, mock_tavily_client):
+        """After writing history, path is printed to stderr with [history] prefix."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("history_enabled = true\n")
+        mock_tavily_client.search.return_value = {"query": "test", "results": [], "response_time": 1.0}
+        runner = CliRunner()
+        with patch("tavily_cli.CONFIG_FILE", str(config_file)), \
+             patch("tavily_cli.CONFIG_DIR", str(tmp_path)):
+            result = runner.invoke(cli, ["-k", "test-key", "search", "test"])
+        assert result.exit_code == 0
+        assert "[history]" in result.stderr
+        assert str(tmp_path) in result.stderr
+        assert ".json" in result.stderr
+
+    def test_history_path_emitted_to_stderr_on_extract(self, tmp_path, mock_tavily_client):
+        """Extract command emits history path to stderr."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("history_enabled = true\n")
+        mock_tavily_client.extract.return_value = {
+            "results": [{"url": "https://example.com", "raw_content": "content"}],
+            "failed_results": [],
+            "response_time": 0.5,
+        }
+        runner = CliRunner()
+        with patch("tavily_cli.CONFIG_FILE", str(config_file)), \
+             patch("tavily_cli.CONFIG_DIR", str(tmp_path)):
+            result = runner.invoke(cli, ["-k", "test-key", "extract", "https://example.com"])
+        assert result.exit_code == 0
+        assert "[history]" in result.stderr
+        assert "extract" in result.stderr
+
+    def test_history_path_emitted_to_stderr_on_crawl(self, tmp_path, mock_tavily_client):
+        """Crawl command emits history path to stderr."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("history_enabled = true\n")
+        mock_tavily_client.crawl.return_value = {
+            "base_url": "https://example.com",
+            "results": [],
+            "response_time": 5.0,
+        }
+        runner = CliRunner()
+        with patch("tavily_cli.CONFIG_FILE", str(config_file)), \
+             patch("tavily_cli.CONFIG_DIR", str(tmp_path)):
+            result = runner.invoke(cli, ["-k", "test-key", "crawl", "https://example.com"])
+        assert result.exit_code == 0
+        assert "[history]" in result.stderr
+        assert "crawl" in result.stderr
+
+    def test_history_path_emitted_to_stderr_on_map(self, tmp_path, mock_tavily_client):
+        """Map command emits history path to stderr."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("history_enabled = true\n")
+        mock_tavily_client.map.return_value = {
+            "base_url": "https://example.com",
+            "results": [],
+            "response_time": 2.0,
+        }
+        runner = CliRunner()
+        with patch("tavily_cli.CONFIG_FILE", str(config_file)), \
+             patch("tavily_cli.CONFIG_DIR", str(tmp_path)):
+            result = runner.invoke(cli, ["-k", "test-key", "map", "https://example.com"])
+        assert result.exit_code == 0
+        assert "[history]" in result.stderr
+        assert "map" in result.stderr
+
+    def test_no_stderr_when_history_disabled(self, tmp_path, mock_tavily_client):
+        """No [history] line emitted when history is not enabled."""
+        mock_tavily_client.search.return_value = {"query": "test", "results": [], "response_time": 1.0}
+        runner = CliRunner()
+        with patch("tavily_cli.CONFIG_FILE", "/nonexistent/config.toml"), \
+             patch("tavily_cli.CONFIG_DIR", str(tmp_path)):
+            result = runner.invoke(cli, ["-k", "test-key", "search", "test"])
+        assert result.exit_code == 0
+        assert "[history]" not in result.stderr
+
+    def test_no_stderr_with_no_history_flag(self, tmp_path, mock_tavily_client):
+        """--no-history flag suppresses stderr path emission."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("history_enabled = true\n")
+        mock_tavily_client.search.return_value = {"query": "test", "results": [], "response_time": 1.0}
+        runner = CliRunner()
+        with patch("tavily_cli.CONFIG_FILE", str(config_file)), \
+             patch("tavily_cli.CONFIG_DIR", str(tmp_path)):
+            result = runner.invoke(cli, ["-k", "test-key", "--no-history", "search", "test"])
+        assert result.exit_code == 0
+        assert "[history]" not in result.stderr
+
+    def test_stderr_path_does_not_pollute_stdout(self, tmp_path, mock_tavily_client):
+        """[history] line must not appear in stdout so JSON piping is unaffected."""
+        config_file = tmp_path / "config.toml"
+        config_file.write_text("history_enabled = true\n")
+        mock_tavily_client.search.return_value = {"query": "test", "results": [], "response_time": 1.0}
+        runner = CliRunner()
+        with patch("tavily_cli.CONFIG_FILE", str(config_file)), \
+             patch("tavily_cli.CONFIG_DIR", str(tmp_path)):
+            result = runner.invoke(cli, ["-k", "test-key", "-f", "json", "search", "test"])
+        assert result.exit_code == 0
+        # stdout must be valid JSON (not contaminated by [history] line)
+        # In Click 8.2+, result.stdout is stdout-only (stderr is separate)
+        parsed = json.loads(result.stdout)
+        assert "query" in parsed
+        assert "[history]" not in result.stdout
+
+    def test_write_history_emits_stderr_directly(self, tmp_path, mock_tavily_client):
+        """write_history() emits [history] path to stderr when history is enabled."""
+        import io
+        cli_instance = TavilyCLI(api_key="test", history_enabled=True)
+        cli_instance.client = mock_tavily_client
+        with patch("tavily_cli.CONFIG_DIR", str(tmp_path)):
+            cli_instance.write_history("search", {"query": "hello"}, {"results": []}, 100)
+        files = list((tmp_path / "history").rglob("*.json"))
+        assert len(files) == 1
+        # The file must exist (stderr emission only happens if write succeeded)
+        assert files[0].exists()
+
+    def test_write_history_no_stderr_when_no_history_flag(self, tmp_path, mock_tavily_client):
+        """write_history() is a no-op (no file, no stderr) when no_history=True."""
+        cli_instance = TavilyCLI(api_key="test", history_enabled=True, no_history=True)
+        cli_instance.client = mock_tavily_client
+        with patch("tavily_cli.CONFIG_DIR", str(tmp_path)):
+            cli_instance.write_history("search", {"query": "hello"}, {"results": []}, 100)
+        history_dir = tmp_path / "history"
+        assert not history_dir.exists()

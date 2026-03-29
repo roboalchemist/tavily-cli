@@ -140,6 +140,7 @@ class TavilyCLI:
             with open(filepath, "w") as f:
                 json.dump(envelope, f, indent=2)
             logger.debug("History written to %s", filepath)
+            click.echo(f"[history] {filepath}", err=True)
         except Exception as e:
             logger.warning("Could not write history file %s: %s", filepath, e)
 
